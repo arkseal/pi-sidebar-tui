@@ -212,6 +212,7 @@ export default function piSidebar(pi: ExtensionAPI) {
         cavemanFrame++;
         requestRender?.();
       }, cavemanInterval(cavemanLevel));
+      cavemanTimer.unref?.();
     }
   };
   const stopActivityAnim = () => {
@@ -224,6 +225,7 @@ export default function piSidebar(pi: ExtensionAPI) {
       activityFrame++;
       requestRender?.();
     }, 90);
+    activityTimer.unref?.();
   };
 
   const setSidebarEnabled = (enabled: boolean, ctx: any) => {
@@ -263,7 +265,10 @@ export default function piSidebar(pi: ExtensionAPI) {
     refreshCavemanLevel();
     stopCavemanAnim();
     if (sessionTimerHandle) { clearInterval(sessionTimerHandle); sessionTimerHandle = null; }
-    sessionTimerHandle = setInterval(() => requestRender?.(), 30_000);
+    if ((ctx as any).hasUI) {
+      sessionTimerHandle = setInterval(() => requestRender?.(), 30_000);
+      sessionTimerHandle.unref?.();
+    }
     activeTool = null;
     turnCount = 0;
     autoCompactEnabled = (ctx as any).settingsManager?.getCompactionSettings?.()?.enabled ?? null;
