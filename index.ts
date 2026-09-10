@@ -8,6 +8,7 @@ import { SidebarCompositor } from "./compositor.ts";
 import { getMcpServers, invalidateMcpCache } from "./mcp.ts";
 import { loadCavemanConfig, resolveCavemanLevel, cavemanInterval, type CavemanConfig } from "./caveman.ts";
 import { setPiTheme } from "./colors.ts";
+import { setSidebarRenderCallback } from "./panels/registry.ts";
 
 const TODO_TOOL_PATTERN = /todo/i;
 const WRITE_TOOLS = new Set(["write", "edit", "bash", "computer"]);
@@ -316,6 +317,7 @@ export default function piSidebar(pi: ExtensionAPI) {
     };
     const myRender = scheduleRender;
     requestRender = myRender;
+    setSidebarRenderCallback(myRender);
 
     // Keep MCP status live: the MCP adapter publishes a runtime snapshot on the
     // shared event bus whenever server state changes (enable/disable, connect,
@@ -333,6 +335,11 @@ export default function piSidebar(pi: ExtensionAPI) {
       setPiTheme(_theme);
       tuiRef = tui;
 
+      if (compositorRef) {
+        compositorRef.dispose();
+        compositorRef = null;
+      }
+
       if (sidebarEnabled) {
         const comp = new SidebarCompositor(
           tui,
@@ -345,7 +352,10 @@ export default function piSidebar(pi: ExtensionAPI) {
 
       return {
         dispose() {
-          if (requestRender === myRender) { requestRender = null; }
+          if (requestRender === myRender) {
+            requestRender = null;
+            setSidebarRenderCallback(null);
+          }
           compositorRef?.dispose();
           compositorRef = null;
           tuiRef = null;
@@ -363,6 +373,7 @@ export default function piSidebar(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    setSidebarRenderCallback(null);
     if (sessionTimerHandle) { clearInterval(sessionTimerHandle); sessionTimerHandle = null; }
     if (unsubscribeMcpStatus) { unsubscribeMcpStatus(); unsubscribeMcpStatus = null; }
     stopCavemanAnim();
@@ -630,3 +641,5 @@ export default function piSidebar(pi: ExtensionAPI) {
     },
   });
 }
+
+export * from "./panels/registry.ts";

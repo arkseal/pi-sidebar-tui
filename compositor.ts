@@ -29,6 +29,10 @@ function descriptorFor(obj: object, key: string): PropertyDescriptor | undefined
   return undefined;
 }
 
+const SYM_ACTIVE_COMPOSITOR = Symbol.for("pi_sidebar_active_compositor");
+const SYM_ORIG_DESC = Symbol.for("pi_sidebar_orig_columns_desc");
+const SYM_ORIG_OWN_DESC = Symbol.for("pi_sidebar_orig_own_desc");
+
 export class SidebarCompositor {
   private tui: any;
   private terminal: any;
@@ -58,12 +62,24 @@ export class SidebarCompositor {
   }
 
   install(): void {
-    // Narrow terminal.columns so pi renders in the left portion only.
-    this.originalColumnsDesc = descriptorFor(this.terminal, "columns");
-    this.originalColumnsOwnDesc = Object.getOwnPropertyDescriptor(this.terminal, "columns");
+    const term = this.terminal as any;
+    // If a compositor is already active on this terminal, dispose it cleanly first!
+    if (term[SYM_ACTIVE_COMPOSITOR] && term[SYM_ACTIVE_COMPOSITOR] !== this) {
+      term[SYM_ACTIVE_COMPOSITOR].dispose();
+    }
+    term[SYM_ACTIVE_COMPOSITOR] = this;
+
+    // Capture the root original descriptor only once across multiple compositor lifetimes
+    if (!term[SYM_ORIG_DESC]) {
+      term[SYM_ORIG_DESC] = descriptorFor(this.terminal, "columns");
+      term[SYM_ORIG_OWN_DESC] = Object.getOwnPropertyDescriptor(this.terminal, "columns");
+    }
+    this.originalColumnsDesc = term[SYM_ORIG_DESC];
+    this.originalColumnsOwnDesc = term[SYM_ORIG_OWN_DESC];
+
     const origDesc = this.originalColumnsDesc;
     const terminal = this.terminal;
-    const self = this; // `this` inside the getter below is the terminal, not the compositor
+    const self = this;
 
     Object.defineProperty(terminal, "columns", {
       configurable: true,
@@ -107,7 +123,11 @@ export class SidebarCompositor {
             writable: true,
             value(this: any, data: string) {
               if (typeof data !== "string") return originalWrite.call(this, data);
-              if (/\x1b\[(?:2J|3J)/.test(data)) forceFullPaint = true;
+              // Any screen clear or scroll/newline shifts terminal rows; must force full repaint
+              if (/\x1b\[(?:2J|3J)|\n|\r\n|\x1b\[\d*S/.test(data)) {
+                forceFullPaint = true;
+                self.cacheValid = false;
+              }
               const sanitized = data
                 .replace(/\x1b\[\?2026[hl]/g, "")
                 .replace(/\x1b\[2K/g, `\x1b[${mainWidth}X`);
@@ -150,7 +170,8 @@ export class SidebarCompositor {
   }
 
   private rawColumns(): number {
-    const d = this.originalColumnsDesc;
+    const term = this.terminal as any;
+    const d = term[SYM_ORIG_DESC] || this.originalColumnsDesc;
     const raw = d?.get
       ? d.get.call(this.terminal)
       : (typeof d?.value === "number" ? d.value : undefined);
@@ -200,12 +221,13 @@ export class SidebarCompositor {
       }
     }
 
-    // Repaint only rows that changed since the last paint. Skip the write
-    // entirely when nothing changed — the core flicker fix.
+    // In regular scrolling mode, rows shift when pi outputs text; always repaint full screen.
+    // In fullscreen alt-screen mode, differential row caching is safe.
+    const isFullscreen = this.tui?.mode === "fullscreen";
     const dimensionsChanged = this.cachedColumns !== rawCols
       || this.cachedRows !== rawRows
       || this.cachedWidth !== sw;
-    const shouldPaintAll = forceFull || !this.cacheValid || dimensionsChanged;
+    const shouldPaintAll = !isFullscreen || forceFull || !this.cacheValid || dimensionsChanged;
     const rows = shouldPaintAll
       ? formattedLines.map((_, index) => index)
       : formattedLines.reduce<number[]>((changed, line, index) => {
@@ -249,11 +271,18 @@ export class SidebarCompositor {
     if (this.disposed) return;
     this.disposed = true;
 
+    const term = this.terminal as any;
+    if (term[SYM_ACTIVE_COMPOSITOR] === this) {
+      delete term[SYM_ACTIVE_COMPOSITOR];
+    }
+
     if (this.originalColumnsOwnDesc) {
       Object.defineProperty(this.terminal, "columns", this.originalColumnsOwnDesc);
     } else {
       Reflect.deleteProperty(this.terminal, "columns");
     }
+    delete term[SYM_ORIG_DESC];
+    delete term[SYM_ORIG_OWN_DESC];
 
     if (this.originalDoRender !== null) {
       this.tui.doRender = this.originalDoRender;
