@@ -66,4 +66,5 @@ export interface SidebarContext {
   lastTps: number | null;
   lastTurnMs: number | null;
   ctxSamples: CtxSample[];
+  showSubagents?: boolean;
 }

@@ -9,7 +9,14 @@ import { DEFAULT_SIDEBAR_SETTINGS } from "../config.ts";
 // (the defaults when no file exists) and persists them on every toggle, so the
 // expected saved settings must match those defaults.
 const W = DEFAULT_SIDEBAR_SETTINGS.width;
-const saved = (enabled: boolean) => ({ enabled, width: W, todosMax: DEFAULT_SIDEBAR_SETTINGS.todosMax });
+const saved = (enabled: boolean) => ({
+  enabled,
+  width: W,
+  todosMax: DEFAULT_SIDEBAR_SETTINGS.todosMax,
+  scrollSpeed: DEFAULT_SIDEBAR_SETTINGS.scrollSpeed,
+  momentum: DEFAULT_SIDEBAR_SETTINGS.momentum,
+  subagents: DEFAULT_SIDEBAR_SETTINGS.subagents,
+});
 
 function fakePi() {
   const shortcuts = new Map<string, { description?: string; handler: (ctx: any) => void }>();
@@ -74,4 +81,22 @@ test("command handler and shortcut share the same enabled state", async () => {
   await shortcuts.get("ctrl+shift+t")!.handler(ctx);
   assert.equal(messages.at(-1), "Sidebar enabled");
   assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), saved(true));
+});
+
+test("sidebar scrolling shortcuts do not conflict with built-in pi shortcuts", async () => {
+  const { default: piSidebar } = await import("../index.ts");
+  const { shortcuts, pi } = fakePi();
+  piSidebar(pi);
+
+  // Must NOT register conflicting alt+up or alt+down
+  assert.equal(shortcuts.get("alt+up"), undefined, "alt+up conflicts with app.models.reorderUp/dequeue");
+  assert.equal(shortcuts.get("alt+down"), undefined, "alt+down conflicts with app.models.reorderDown");
+
+  // Must register non-conflicting scroll shortcuts
+  assert.ok(shortcuts.get("alt+shift+up"), "alt+shift+up should be registered");
+  assert.ok(shortcuts.get("alt+shift+down"), "alt+shift+down should be registered");
+  assert.ok(shortcuts.get("ctrl+alt+up"), "ctrl+alt+up should be registered");
+  assert.ok(shortcuts.get("ctrl+alt+down"), "ctrl+alt+down should be registered");
+  assert.ok(shortcuts.get("alt+pageup"), "alt+pageup should be registered");
+  assert.ok(shortcuts.get("alt+pagedown"), "alt+pagedown should be registered");
 });

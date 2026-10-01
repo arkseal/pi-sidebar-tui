@@ -7,7 +7,7 @@ import { dim } from "./colors.ts";
 // Set PI_SIDEBAR_BG="#rrggbb" to paint an opaque panel (hides scroll flash).
 const SIDEBAR_BG = (() => {
   const hex = process.env["PI_SIDEBAR_BG"]?.replace("#", "");
-  if (!/^[0-9a-fA-F]{6}$/.test(hex ?? "")) return "";
+  if (!hex || !/^[0-9a-fA-F]{6}$/.test(hex)) return "";
   const r = parseInt(hex.slice(0, 2), 16);
   const g = parseInt(hex.slice(2, 4), 16);
   const b = parseInt(hex.slice(4, 6), 16);
@@ -44,6 +44,10 @@ export class SidebarCompositor {
   private disposed = false;
 
   private readonly sidebarWidth: number;
+
+  // Scroll offset for sidebar content when it overflows visible terminal rows
+  private scrollTop = 0;
+  private maxScrollTop = 0;
 
   // Last painted sidebar content, used to repaint only rows that actually
   // changed. Prevents full-panel rewrites every frame (the flicker source).
@@ -124,7 +128,7 @@ export class SidebarCompositor {
             value(this: any, data: string) {
               if (typeof data !== "string") return originalWrite.call(this, data);
               // Any screen clear or scroll/newline shifts terminal rows; must force full repaint
-              if (/\x1b\[(?:2J|3J)|\n|\r\n|\x1b\[\d*S/.test(data)) {
+              if (/\x1b\[(?:2J|3J)|\n|\r\n|\x1b\[\d*[ST]|\x1bM/.test(data)) {
                 forceFullPaint = true;
                 self.cacheValid = false;
               }
@@ -162,6 +166,63 @@ export class SidebarCompositor {
         return result;
       };
     }
+  }
+
+  private computeMaxScrollTop(): number {
+    const rawRows = this.terminal.rows;
+    const ctx = this.getCtx();
+    const hasCwd = Boolean(ctx.cwd);
+    const visiblePanelRows = hasCwd ? Math.max(1, rawRows - 1) : rawRows;
+    const lines = renderSidebar(ctx, this.sidebarWidth);
+    const totalLines = lines.length;
+    if (totalLines <= visiblePanelRows) return 0;
+    const contentRowsAtBottom = Math.max(1, visiblePanelRows - 1);
+    return Math.max(0, totalLines - contentRowsAtBottom);
+  }
+
+  getScrollTop(): number {
+    return this.scrollTop;
+  }
+
+  getMaxScrollTop(): number {
+    if (this.maxScrollTop === 0) {
+      this.maxScrollTop = this.computeMaxScrollTop();
+    }
+    return this.maxScrollTop;
+  }
+
+  getSeparatorColumn(): number {
+    return this.rawColumns() - this.sidebarWidth;
+  }
+
+  scrollTo(top: number): void {
+    if (this.maxScrollTop === 0) {
+      this.maxScrollTop = this.computeMaxScrollTop();
+    }
+    const clamped = Math.max(0, Math.min(this.maxScrollTop, top));
+    if (clamped !== this.scrollTop || !this.cacheValid) {
+      this.scrollTop = clamped;
+      this.cacheValid = false;
+      this.paint();
+    }
+  }
+
+  scrollBy(delta: number): void {
+    if (this.maxScrollTop === 0) {
+      this.maxScrollTop = this.computeMaxScrollTop();
+    }
+    this.scrollTo(this.scrollTop + delta);
+  }
+
+  scrollToTop(): void {
+    this.scrollTo(0);
+  }
+
+  scrollToBottom(): void {
+    if (this.maxScrollTop === 0) {
+      this.maxScrollTop = this.computeMaxScrollTop();
+    }
+    this.scrollTo(this.maxScrollTop);
   }
 
   paint(): void {
@@ -202,6 +263,7 @@ export class SidebarCompositor {
 
     const ctx = this.getCtx();
     const lines = renderSidebar(ctx, sw);
+    const totalLines = lines.length;
 
     // Build the full set of formatted lines (panel rows + bottom cwd row).
     const home = process.env["HOME"] ?? "";
@@ -212,13 +274,71 @@ export class SidebarCompositor {
       : cwdDisplay;
     const cwdLine = dim(" " + cwdTruncated);
 
-    const formattedLines: string[] = [];
-    for (let row = 1; row <= rawRows; row++) {
-      if (row === rawRows && cwd) {
-        formattedLines.push(this.formatLine(cwdLine, sw));
-      } else {
-        formattedLines.push(this.formatLine(lines[row - 1], sw));
+    const hasCwd = Boolean(cwd);
+    const visiblePanelRows = hasCwd ? Math.max(1, rawRows - 1) : rawRows;
+
+    let panelLinesToRender: string[];
+
+    if (totalLines <= visiblePanelRows) {
+      this.maxScrollTop = 0;
+      this.scrollTop = 0;
+      panelLinesToRender = [];
+      for (let i = 0; i < visiblePanelRows; i++) {
+        panelLinesToRender.push(lines[i] ?? "");
       }
+    } else {
+      // Content overflows visible rows.
+      // When scrolled to the bottom, 1 row is reserved for the top indicator, leaving
+      // (visiblePanelRows - 1) rows for content to reach the exact last line.
+      // Therefore maxScrollTop is constant: totalLines - (visiblePanelRows - 1).
+      const contentRowsAtBottom = Math.max(1, visiblePanelRows - 1);
+      this.maxScrollTop = Math.max(0, totalLines - contentRowsAtBottom);
+      this.scrollTop = Math.max(0, Math.min(this.maxScrollTop, this.scrollTop));
+
+      const isAtTop = this.scrollTop === 0;
+      const isAtBottom = this.scrollTop >= this.maxScrollTop;
+
+      panelLinesToRender = [];
+
+      if (isAtTop) {
+        // At top: no top indicator; last panel row shows bottom indicator
+        const contentRows = Math.max(1, visiblePanelRows - 1);
+        for (let i = 0; i < contentRows; i++) {
+          panelLinesToRender.push(lines[i] ?? "");
+        }
+        const linesBelow = Math.max(1, totalLines - contentRows);
+        panelLinesToRender.push(dim(` ▼ ${linesBelow} line${linesBelow === 1 ? "" : "s"} below`));
+      } else if (isAtBottom) {
+        // At bottom: top indicator shown; no bottom indicator so the actual last line is visible
+        panelLinesToRender.push(dim(` ▲ ${this.scrollTop} line${this.scrollTop === 1 ? "" : "s"} above`));
+        const contentRows = Math.max(1, visiblePanelRows - 1);
+        for (let i = 0; i < contentRows; i++) {
+          const idx = this.scrollTop + i;
+          panelLinesToRender.push(lines[idx] ?? "");
+        }
+      } else {
+        // In the middle: both top and bottom indicators shown
+        panelLinesToRender.push(dim(` ▲ ${this.scrollTop} line${this.scrollTop === 1 ? "" : "s"} above`));
+        const contentRows = Math.max(1, visiblePanelRows - 2);
+        for (let i = 0; i < contentRows; i++) {
+          const idx = this.scrollTop + i;
+          panelLinesToRender.push(lines[idx] ?? "");
+        }
+        const linesBelow = Math.max(1, totalLines - (this.scrollTop + contentRows));
+        panelLinesToRender.push(dim(` ▼ ${linesBelow} line${linesBelow === 1 ? "" : "s"} below`));
+      }
+
+      while (panelLinesToRender.length < visiblePanelRows) {
+        panelLinesToRender.push("");
+      }
+    }
+
+    const formattedLines: string[] = [];
+    for (let i = 0; i < visiblePanelRows; i++) {
+      formattedLines.push(this.formatLine(panelLinesToRender[i], sw));
+    }
+    if (hasCwd) {
+      formattedLines.push(this.formatLine(cwdLine, sw));
     }
 
     // In regular scrolling mode, rows shift when pi outputs text; always repaint full screen.

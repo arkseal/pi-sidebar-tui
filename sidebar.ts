@@ -9,7 +9,10 @@ import { getRegisteredSidebarPanels } from "./panels/registry.ts";
 export function renderSidebar(ctx: SidebarContext, width: number): string[] {
   const safeWidth = Math.max(1, width);
 
-  const dynamicPanels = getRegisteredSidebarPanels();
+  const rawDynamicPanels = getRegisteredSidebarPanels();
+  const dynamicPanels = ctx.showSubagents === false
+    ? rawDynamicPanels.filter(p => p.id !== "subagents")
+    : rawDynamicPanels;
   const earlyPanels = dynamicPanels.filter(p => (p.order ?? 20) < 30).map(p => p.render(ctx, safeWidth));
   const midPanels = dynamicPanels.filter(p => (p.order ?? 20) >= 30 && (p.order ?? 20) < 40).map(p => p.render(ctx, safeWidth));
   const postTodoPanels = dynamicPanels.filter(p => (p.order ?? 20) >= 40 && (p.order ?? 20) < 50).map(p => p.render(ctx, safeWidth));

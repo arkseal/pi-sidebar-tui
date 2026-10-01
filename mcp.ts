@@ -26,13 +26,14 @@ function readJson(path: string): unknown {
   }
 }
 
-function estimateTokens(tool: { name: string; description?: string; inputSchema?: unknown }): number {
-  const schemaLen = JSON.stringify(tool.inputSchema ?? {}).length;
+function estimateTokens(tool: { name: string; description?: string; inputSchema?: unknown; parameters?: unknown }): number {
+  const schema = tool.inputSchema ?? tool.parameters ?? {};
+  const schemaLen = JSON.stringify(schema).length;
   const descLen = tool.description?.length ?? 0;
   return Math.ceil((tool.name.length + descLen + schemaLen) / 4) + 10;
 }
 
-function computeMcpServers(): McpServerInfo[] {
+function computeMcpServers(liveTools?: any[]): McpServerInfo[] {
   const agentDir = getAgentDir();
   const config = readJson(join(agentDir, "mcp.json")) as any;
   const cache = readJson(join(agentDir, "mcp-cache.json")) as any;
@@ -49,12 +50,25 @@ function computeMcpServers(): McpServerInfo[] {
 
   return names.map((name) => {
     const definition = configuredServers[name] ?? {};
-    const srv = cachedServers[name];
-    const tools: any[] = srv?.tools ?? [];
+    const isDisabled = definition.disabled === true || definition.enabled === false;
 
     // A disabled server is surfaced with no tool counts regardless of any cached tools.
-    if (definition.disabled === true) {
+    if (isDisabled) {
       return { name, directCount: 0, totalCount: 0, tokenEstimate: 0, connected: false, disabled: true };
+    }
+
+    const srv = cachedServers[name];
+    let tools: any[] = srv?.tools ?? [];
+
+    // If liveTools from pi.getAllTools() are available, discover tools registered by built-in MCP
+    if (liveTools && liveTools.length > 0) {
+      const serverPrefix = "mcp__" + name.replace(/[^A-Za-z0-9_]/g, "_") + "__";
+      const matchingLive = liveTools.filter((t: any) =>
+        t?.name?.startsWith(serverPrefix) || t?.namespace?.name === "mcp__" + name || t?.label?.startsWith(name + "/")
+      );
+      if (matchingLive.length > 0) {
+        tools = matchingLive;
+      }
     }
 
     const connected = tools.length > 0;
@@ -63,6 +77,8 @@ function computeMcpServers(): McpServerInfo[] {
     let toolFilter: true | string[] | false = false;
     if (definition.directTools !== undefined) {
       toolFilter = definition.directTools;
+    } else if (definition.exposure === "direct") {
+      toolFilter = true;
     } else if (globalDirect) {
       toolFilter = globalDirect;
     }
@@ -74,11 +90,16 @@ function computeMcpServers(): McpServerInfo[] {
     let totalCount = 0;
 
     for (const tool of tools) {
+      const toolName = tool.name?.includes("__") ? tool.name.split("__").pop()! : tool.name;
       // Simple exclude check
-      if (excludeTools.includes(tool.name)) continue;
+      if (excludeTools.includes(toolName) || excludeTools.includes(tool.name)) continue;
       totalCount++;
 
-      const isDirect = toolFilter === true || (Array.isArray(toolFilter) && toolFilter.includes(tool.name));
+      const isDirect =
+        tool.exposure === "direct" ||
+        toolFilter === true ||
+        (Array.isArray(toolFilter) && (toolFilter.includes(toolName) || toolFilter.includes(tool.name)));
+
       if (isDirect) {
         directCount++;
         tokenEstimate += estimateTokens(tool);
@@ -89,11 +110,11 @@ function computeMcpServers(): McpServerInfo[] {
   });
 }
 
-export function getMcpServers(): McpServerInfo[] {
+export function getMcpServers(liveTools?: any[]): McpServerInfo[] {
   const now = Date.now();
-  if (mcpCache && now - mcpCache.timestamp < MCP_CACHE_TTL_MS) return mcpCache.data;
+  if (liveTools === undefined && mcpCache && now - mcpCache.timestamp < MCP_CACHE_TTL_MS) return mcpCache.data;
 
-  const data = computeMcpServers();
+  const data = computeMcpServers(liveTools);
   mcpCache = { data, timestamp: now };
   return data;
 }

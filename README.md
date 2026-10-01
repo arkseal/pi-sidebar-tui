@@ -53,8 +53,22 @@ The sidebar activates automatically when a session starts. Toggle visibility wit
 /sidebar-tui on       # Enable sidebar
 /sidebar-tui off      # Disable sidebar
 /sidebar-tui width 45 # Set sidebar width (10-120)
+/sidebar-tui todos 5  # Set max visible todos (1-100)
+/sidebar-tui scroll 1   # Set scroll speed in lines (1-20, default: 1)
+/sidebar-tui momentum on|off # Enable/disable scroll velocity momentum (default: on)
+/sidebar-tui subagents input|sidebar|both # Configure subagents display (default: both)
 
-Ctrl+Shift+S           # Toggle sidebar on/off (rebind in ~/.pi/agent/keybindings.json)
+/sidebar-scroll down  # Scroll sidebar panel down 3 lines
+/sidebar-scroll up    # Scroll sidebar panel up 3 lines
+/sidebar-scroll top   # Scroll to top of sidebar
+/sidebar-scroll bottom # Scroll to bottom of sidebar
+/sidebar-scroll 10    # Scroll to specific line offset
+
+Alt+Shift+Up / Alt+Shift+Down # Scroll sidebar up / down (3 lines, or Ctrl+Alt+Up / Ctrl+Alt+Down)
+Alt+PageUp / Alt+PageDown # Scroll sidebar page up / down (10 lines)
+Mouse Wheel over sidebar # Scroll sidebar panel with momentum acceleration
+
+Ctrl+Shift+T           # Toggle sidebar on/off
 ```
 
 Set custom session title:
@@ -68,11 +82,22 @@ Set custom session title:
 | Env var | Default | Description |
 | --- | --- | --- |
 | `PI_SIDEBAR_BG` | *(unset)* | Paint the sidebar with an opaque `#rrggbb` background. Unset (default) leaves the terminal background untouched so terminal transparency shows through. Set e.g. `PI_SIDEBAR_BG="#000000"` to hide scroll flash on opaque terminals. |
+| `PI_SIDEBAR_SCROLL_SPEED` | `1` | Number of lines to scroll per wheel/trackpad tick in fullscreen mode (1–20). |
+| `PI_SIDEBAR_MOMENTUM` | `1` | Enable scroll momentum/velocity acceleration and inertial glide (`1`/`true` or `0`/`false`). |
+| `PI_SIDEBAR_SUBAGENTS` | `1` | Show dynamic subagents panel in sidebar (`1`/`true` or `0`/`false`). |
 
 ## Requirements
 
 - [pi coding agent](https://github.com/earendil-works/pi) >= 0.74.0
 - [pi-tui](https://github.com/earendil-works/pi) >= 0.74.0
+
+## Persistent Scrolling (Fullscreen TUI Mode)
+
+To keep the sidebar persistent and pinned when scrolling through earlier messages, Pi's **fullscreen TUI mode** (`tuiMode: "fullscreen"`) is used.
+- In **fullscreen mode**, Pi manages viewport scrolling (`ScrollView`) with mouse wheel, trackpad, and keyboard shortcuts (`PageUp`/`PageDown`), keeping the sidebar fixed on the right.
+- In **regular mode**, the terminal emulator owns native scrollback, causing the sidebar to stay down at the bottom of history when scrolling up.
+
+`pi-sidebar-tui` automatically sets `tuiMode: "fullscreen"` in your Pi settings. You can also run Pi with `pi --tui-mode fullscreen` or toggle TUI mode in `/settings`.
 
 ## Architecture
 

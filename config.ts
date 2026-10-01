@@ -19,13 +19,21 @@ export interface SidebarSettings {
   width: number;
   /** Max todos shown in the Todos panel before it caps to the last N (+ a "+N more" footer). */
   todosMax: number;
+  /** Number of lines to scroll per wheel/trackpad tick in fullscreen mode (default: 1). */
+  scrollSpeed: number;
+  /** Whether scrolling carries velocity and momentum in fullscreen mode (default: true). */
+  momentum: boolean;
+  /** Whether the dynamic subagents panel is shown in the sidebar (default: true). */
+  subagents: boolean;
 }
 
-export const DEFAULT_SIDEBAR_SETTINGS: SidebarSettings = { enabled: true, width: 45, todosMax: 5 };
+export const DEFAULT_SIDEBAR_SETTINGS: SidebarSettings = { enabled: true, width: 45, todosMax: 5, scrollSpeed: 1, momentum: true, subagents: true };
 export const MIN_SIDEBAR_WIDTH = 10;
 export const MAX_SIDEBAR_WIDTH = 120;
 export const MIN_TODOS_MAX = 1;
 export const MAX_TODOS_MAX = 100;
+export const MIN_SCROLL_SPEED = 1;
+export const MAX_SCROLL_SPEED = 20;
 
 export function sidebarConfigPath(): string {
   return process.env["PI_SIDEBAR_CONFIG"] || join(agentDir(), "sidebar-tui.json");
@@ -62,6 +70,26 @@ export function loadSidebarSettings(path: string = sidebarConfigPath()): Sidebar
   if (typeof tm === "number" && Number.isInteger(tm) && tm >= MIN_TODOS_MAX && tm <= MAX_TODOS_MAX) {
     settings.todosMax = tm;
   }
+  const ss = obj["scrollSpeed"];
+  if (typeof ss === "number" && Number.isInteger(ss) && ss >= MIN_SCROLL_SPEED && ss <= MAX_SCROLL_SPEED) {
+    settings.scrollSpeed = ss;
+  }
+  const envSpeed = process.env["PI_SIDEBAR_SCROLL_SPEED"] ? parseInt(process.env["PI_SIDEBAR_SCROLL_SPEED"], 10) : NaN;
+  if (!isNaN(envSpeed) && envSpeed >= MIN_SCROLL_SPEED && envSpeed <= MAX_SCROLL_SPEED) {
+    settings.scrollSpeed = envSpeed;
+  }
+  if (typeof obj["momentum"] === "boolean") {
+    settings.momentum = obj["momentum"];
+  }
+  const envMom = process.env["PI_SIDEBAR_MOMENTUM"];
+  if (envMom === "1" || envMom === "true") settings.momentum = true;
+  if (envMom === "0" || envMom === "false") settings.momentum = false;
+  if (typeof obj["subagents"] === "boolean") {
+    settings.subagents = obj["subagents"];
+  }
+  const envSubagents = process.env["PI_SIDEBAR_SUBAGENTS"];
+  if (envSubagents === "1" || envSubagents === "true") settings.subagents = true;
+  if (envSubagents === "0" || envSubagents === "false") settings.subagents = false;
   return settings;
 }
 

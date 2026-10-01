@@ -1,4 +1,5 @@
 import type { SidebarContext } from "../types.ts";
+import { fg, bold, dim, panelHeader, COLORS } from "../colors.ts";
 
 export interface DynamicSidebarPanel {
   id: string;
@@ -13,6 +14,11 @@ export interface PiSidebarGlobalAPI {
   getPanels: () => DynamicSidebarPanel[];
   isAvailable: () => boolean;
   requestRender: () => void;
+  fg: (colorName: string, text: string) => string;
+  bold: (text: string) => string;
+  dim: (text: string) => string;
+  panelHeader: (title: string, width: number) => string[];
+  COLORS: typeof COLORS;
 }
 
 const g = globalThis as unknown as {
@@ -75,4 +81,9 @@ g.__PI_SIDEBAR_TUI__ = {
   getPanels: getRegisteredSidebarPanels,
   isAvailable: isSidebarAvailable,
   requestRender: requestSidebarRender,
+  fg,
+  bold,
+  dim,
+  panelHeader,
+  COLORS,
 };

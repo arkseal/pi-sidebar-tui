@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { loadSidebarSettings, saveSidebarSettings, MIN_TODOS_MAX, MAX_TODOS_MAX } from "./config.ts";
+import { loadSidebarSettings, saveSidebarSettings, MIN_TODOS_MAX, MAX_TODOS_MAX, MIN_SCROLL_SPEED, MAX_SCROLL_SPEED } from "./config.ts";
 import type { TodoItem, SidebarContext, CtxSample } from "./types.ts";
 import { parseTodos, reconstructTodosFromBranch } from "./parse-todos.ts";
 import { renderSidebar } from "./sidebar.ts";
@@ -9,6 +9,7 @@ import { getMcpServers, invalidateMcpCache } from "./mcp.ts";
 import { loadCavemanConfig, resolveCavemanLevel, cavemanInterval, type CavemanConfig } from "./caveman.ts";
 import { setPiTheme } from "./colors.ts";
 import { setSidebarRenderCallback } from "./panels/registry.ts";
+import { ScrollMomentum } from "./momentum.ts";
 
 const TODO_TOOL_PATTERN = /todo/i;
 const WRITE_TOOLS = new Set(["write", "edit", "bash", "computer"]);
@@ -17,6 +18,10 @@ const initialSettings = loadSidebarSettings();
 let sidebarEnabled = initialSettings.enabled;
 let sidebarWidth = initialSettings.width;
 let todosMax = initialSettings.todosMax;
+let scrollSpeed = initialSettings.scrollSpeed ?? 1;
+let momentumEnabled = initialSettings.momentum ?? true;
+let subagentsEnabled = initialSettings.subagents ?? true;
+let currentPi: ExtensionAPI | null = null;
 let sessionManager: any = null;
 let sessionTitle: string | null = null;
 let todos: TodoItem[] = [];
@@ -46,6 +51,7 @@ const CTX_SAMPLE_MAX = 10;
 const TPS_WINDOW_MS = 2000;
 let sessionTimerHandle: ReturnType<typeof setInterval> | null = null;
 let unsubscribeMcpStatus: (() => void) | null = null;
+let unsubscribeSubagentStats: (() => void) | null = null;
 let cavemanLevel: string | null = null;
 let cavemanFrame = 0;
 let cavemanTimer: ReturnType<typeof setInterval> | null = null;
@@ -155,7 +161,7 @@ function buildSidebarContext(cwd: string | undefined): SidebarContext {
     activeTool,
     autoCompactEnabled,
     sessionStartMs,
-    mcpServers: getMcpServers(),
+    mcpServers: getMcpServers(currentPi?.getAllTools?.()),
     modelProvider,
     cavemanLevel,
     cavemanFrame,
@@ -165,6 +171,7 @@ function buildSidebarContext(cwd: string | undefined): SidebarContext {
     lastTps,
     lastTurnMs,
     ctxSamples,
+    showSubagents: subagentsEnabled,
   };
 }
 
@@ -196,11 +203,36 @@ function updateContextUsage(ctx: any): void {
   }
 }
 
+export function applyScrollSpeed(tui: any, speed: number): void {
+  if (tui && typeof speed === "number" && speed >= 1) {
+    try {
+      tui.wheelScrollLines = speed;
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export function ensureFullscreenTuiMode(ctx: any): boolean {
+  try {
+    const sm = ctx?.settingsManager;
+    if (sm && typeof sm.getTuiMode === "function" && sm.getTuiMode() !== "fullscreen") {
+      sm.setTuiMode("fullscreen");
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
 export default function piSidebar(pi: ExtensionAPI) {
+  currentPi = pi;
   let currentCwd: string | undefined = process.cwd();
   let requestRender: (() => void) | null = null;
   let tuiRef: any = null;
   let compositorRef: SidebarCompositor | null = null;
+  let momentumRef: ScrollMomentum | null = null;
 
   const stopCavemanAnim = () => {
     if (cavemanTimer) { clearInterval(cavemanTimer); cavemanTimer = null; }
@@ -231,16 +263,36 @@ export default function piSidebar(pi: ExtensionAPI) {
 
   const setSidebarEnabled = (enabled: boolean, ctx: any) => {
     sidebarEnabled = enabled;
-    saveSidebarSettings({ enabled: sidebarEnabled, width: sidebarWidth, todosMax });
+    saveSidebarSettings({ enabled: sidebarEnabled, width: sidebarWidth, todosMax, scrollSpeed, momentum: momentumEnabled, subagents: subagentsEnabled });
 
     if (!sidebarEnabled) {
       compositorRef?.dispose();
       compositorRef = null;
+      momentumRef?.dispose();
+      momentumRef = null;
     } else if (tuiRef && !compositorRef) {
       const comp = new SidebarCompositor(tuiRef, () => buildSidebarContext(currentCwd), sidebarWidth);
       comp.install();
       compositorRef = comp;
+      applyScrollSpeed(tuiRef, scrollSpeed);
+      if (!momentumRef) {
+        const m = new ScrollMomentum(tuiRef, { enabled: momentumEnabled, baseSpeed: scrollSpeed }, () => compositorRef);
+        m.install();
+        momentumRef = m;
+      } else {
+        momentumRef.setCompositor(() => compositorRef);
+      }
       requestRender?.();
+    }
+
+    if (sidebarEnabled) {
+      const changed = ensureFullscreenTuiMode(ctx);
+      if (changed && (ctx as any).mode === "tui") {
+        (ctx as any).ui?.notify?.(
+          "Sidebar persistent scrolling requires fullscreen TUI mode. Setting saved to fullscreen; restart session to activate.",
+          "info"
+        );
+      }
     }
 
     (ctx as any).ui?.notify?.(
@@ -329,6 +381,19 @@ export default function piSidebar(pi: ExtensionAPI) {
         invalidateMcpCache();
         requestRender?.();
       });
+
+      if (unsubscribeSubagentStats) { unsubscribeSubagentStats(); unsubscribeSubagentStats = null; }
+      unsubscribeSubagentStats = pi.events.on("subagent:stats", (data: any) => {
+        const st = data?.stats;
+        if (st) {
+          tokensIn += st.tokensIn ?? 0;
+          tokensOut += st.tokensOut ?? 0;
+          cacheRead += st.cacheRead ?? 0;
+          cacheWrite += st.cacheWrite ?? 0;
+          sessionCost += st.cost ?? 0;
+          requestRender?.();
+        }
+      });
     }
 
     ui.setWidget("pi-sidebar", (tui: any, _theme: any) => {
@@ -339,8 +404,17 @@ export default function piSidebar(pi: ExtensionAPI) {
         compositorRef.dispose();
         compositorRef = null;
       }
+      if (momentumRef) {
+        momentumRef.dispose();
+        momentumRef = null;
+      }
 
       if (sidebarEnabled) {
+        applyScrollSpeed(tui, scrollSpeed);
+        const m = new ScrollMomentum(tui, { enabled: momentumEnabled, baseSpeed: scrollSpeed }, () => compositorRef);
+        m.install();
+        momentumRef = m;
+
         const comp = new SidebarCompositor(
           tui,
           () => buildSidebarContext(currentCwd),
@@ -348,6 +422,16 @@ export default function piSidebar(pi: ExtensionAPI) {
         );
         comp.install();
         compositorRef = comp;
+
+        if (tui?.mode === "regular") {
+          const changed = ensureFullscreenTuiMode(ctx);
+          if (changed) {
+            (ctx as any).ui?.notify?.(
+              "Sidebar persistent scrolling requires fullscreen TUI mode. Setting saved to fullscreen; restart session to activate.",
+              "info"
+            );
+          }
+        }
       }
 
       return {
@@ -358,6 +442,8 @@ export default function piSidebar(pi: ExtensionAPI) {
           }
           compositorRef?.dispose();
           compositorRef = null;
+          momentumRef?.dispose();
+          momentumRef = null;
           tuiRef = null;
         },
         invalidate() {},
@@ -374,8 +460,11 @@ export default function piSidebar(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     setSidebarRenderCallback(null);
+    momentumRef?.dispose();
+    momentumRef = null;
     if (sessionTimerHandle) { clearInterval(sessionTimerHandle); sessionTimerHandle = null; }
     if (unsubscribeMcpStatus) { unsubscribeMcpStatus(); unsubscribeMcpStatus = null; }
+    if (unsubscribeSubagentStats) { unsubscribeSubagentStats(); unsubscribeSubagentStats = null; }
     stopCavemanAnim();
     stopActivityAnim();
     agentActive = false;
@@ -571,11 +660,26 @@ export default function piSidebar(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("sidebar-tui", {
-    description: "Control sidebar: /sidebar-tui on | off | width <N> | todos <N>",
+    description: "Control sidebar: /sidebar-tui on | off | width <N> | todos <N> | scroll <N> | momentum <on|off> | subagents <input|sidebar|both|on|off>",
     handler: async (args, ctx) => {
       currentCwd = (ctx as any).cwd;
       const parts = (args?.trim() ?? "").split(/\s+/);
       const cmd = parts[0];
+
+      if (cmd === "subagents") {
+        const val = parts[1]?.toLowerCase();
+        if (val === "input" || val === "off" || val === "1") {
+          subagentsEnabled = false;
+        } else if (val === "sidebar" || val === "both" || val === "on" || val === "2" || val === "3") {
+          subagentsEnabled = true;
+        } else {
+          subagentsEnabled = !subagentsEnabled;
+        }
+        saveSidebarSettings({ enabled: sidebarEnabled, width: sidebarWidth, todosMax, scrollSpeed, momentum: momentumEnabled, subagents: subagentsEnabled });
+        requestRender?.();
+        (ctx as any).ui?.notify?.(`Sidebar subagents panel ${subagentsEnabled ? "enabled" : "disabled"}`, "info");
+        return;
+      }
 
       if (cmd === "width") {
         const n = parseInt(parts[1] ?? "", 10);
@@ -584,7 +688,7 @@ export default function piSidebar(pi: ExtensionAPI) {
           return;
         }
         sidebarWidth = n;
-        saveSidebarSettings({ enabled: sidebarEnabled, width: sidebarWidth, todosMax });
+        saveSidebarSettings({ enabled: sidebarEnabled, width: sidebarWidth, todosMax, scrollSpeed, momentum: momentumEnabled, subagents: subagentsEnabled });
         if (compositorRef && tuiRef) {
           compositorRef.dispose();
           compositorRef = null;
@@ -604,14 +708,41 @@ export default function piSidebar(pi: ExtensionAPI) {
           return;
         }
         todosMax = n;
-        saveSidebarSettings({ enabled: sidebarEnabled, width: sidebarWidth, todosMax });
+        saveSidebarSettings({ enabled: sidebarEnabled, width: sidebarWidth, todosMax, scrollSpeed, momentum: momentumEnabled, subagents: subagentsEnabled });
         requestRender?.();
         (ctx as any).ui?.notify?.(`Todos max set to ${n}`, "info");
         return;
       }
 
+      if (cmd === "scroll") {
+        const n = parseInt(parts[1] ?? "", 10);
+        if (isNaN(n) || n < MIN_SCROLL_SPEED || n > MAX_SCROLL_SPEED) {
+          (ctx as any).ui?.notify?.(`Usage: /sidebar-tui scroll <${MIN_SCROLL_SPEED}-${MAX_SCROLL_SPEED}>`, "warning");
+          return;
+        }
+        scrollSpeed = n;
+        saveSidebarSettings({ enabled: sidebarEnabled, width: sidebarWidth, todosMax, scrollSpeed, momentum: momentumEnabled, subagents: subagentsEnabled });
+        applyScrollSpeed(tuiRef, scrollSpeed);
+        momentumRef?.setBaseSpeed(scrollSpeed);
+        (ctx as any).ui?.notify?.(`Scroll speed set to ${n} lines`, "info");
+        return;
+      }
+
+      if (cmd === "momentum") {
+        const val = parts[1]?.toLowerCase();
+        if (val !== "on" && val !== "off") {
+          (ctx as any).ui?.notify?.("Usage: /sidebar-tui momentum <on|off>", "warning");
+          return;
+        }
+        momentumEnabled = val === "on";
+        saveSidebarSettings({ enabled: sidebarEnabled, width: sidebarWidth, todosMax, scrollSpeed, momentum: momentumEnabled, subagents: subagentsEnabled });
+        momentumRef?.setEnabled(momentumEnabled);
+        (ctx as any).ui?.notify?.(`Scroll momentum ${momentumEnabled ? "enabled" : "disabled"}`, "info");
+        return;
+      }
+
       if (cmd !== "on" && cmd !== "off") {
-        (ctx as any).ui?.notify?.("Usage: /sidebar-tui on | off | width <N> | todos <N>", "warning");
+        (ctx as any).ui?.notify?.("Usage: /sidebar-tui on | off | width <N> | todos <N> | scroll <N> | momentum <on|off> | subagents <on|off>", "warning");
         return;
       }
 
@@ -638,6 +769,76 @@ export default function piSidebar(pi: ExtensionAPI) {
       sessionTitle = title;
       requestRender?.();
       (ctx as any).ui?.notify?.(`Session title set: ${title}`, "info");
+    },
+  });
+
+  pi.registerCommand("sidebar-scroll", {
+    description: "Scroll sidebar panel: /sidebar-scroll up | down | top | bottom | <lines>",
+    handler: async (args, ctx) => {
+      if (!compositorRef) {
+        (ctx as any).ui?.notify?.("Sidebar is not active.", "warning");
+        return;
+      }
+      const arg = args?.trim().toLowerCase() || "down";
+      if (arg === "up") {
+        compositorRef.scrollBy(-3);
+      } else if (arg === "down") {
+        compositorRef.scrollBy(3);
+      } else if (arg === "top" || arg === "start") {
+        compositorRef.scrollToTop();
+      } else if (arg === "bottom" || arg === "end") {
+        compositorRef.scrollToBottom();
+      } else {
+        const n = parseInt(arg, 10);
+        if (!isNaN(n)) {
+          compositorRef.scrollBy(n);
+        } else {
+          (ctx as any).ui?.notify?.("Usage: /sidebar-scroll up | down | top | bottom | <lines>", "warning");
+          return;
+        }
+      }
+    },
+  });
+
+  pi.registerShortcut("alt+shift+up", {
+    description: "Scroll sidebar up",
+    handler: async () => {
+      compositorRef?.scrollBy(-3);
+    },
+  });
+
+  pi.registerShortcut("alt+shift+down", {
+    description: "Scroll sidebar down",
+    handler: async () => {
+      compositorRef?.scrollBy(3);
+    },
+  });
+
+  pi.registerShortcut("ctrl+alt+up", {
+    description: "Scroll sidebar up",
+    handler: async () => {
+      compositorRef?.scrollBy(-3);
+    },
+  });
+
+  pi.registerShortcut("ctrl+alt+down", {
+    description: "Scroll sidebar down",
+    handler: async () => {
+      compositorRef?.scrollBy(3);
+    },
+  });
+
+  pi.registerShortcut("alt+pageup", {
+    description: "Scroll sidebar page up",
+    handler: async () => {
+      compositorRef?.scrollBy(-10);
+    },
+  });
+
+  pi.registerShortcut("alt+pagedown", {
+    description: "Scroll sidebar page down",
+    handler: async () => {
+      compositorRef?.scrollBy(10);
     },
   });
 }

@@ -172,3 +172,58 @@ test("mcp panel: connected-all server keeps success dot and counts", () => {
   assert.ok(text.includes("●"), `expected success dot, got: ${text}`);
   assert.ok(!text.includes("⊘"), `unexpected disabled glyph: ${text}`);
 });
+
+test("getMcpServers: discovers tools from built-in MCP live tools", () => {
+  withAgentDir(
+    (dir) =>
+      writeConfig(dir, {
+        mcpServers: {
+          playwright: { command: "npx", args: ["-y", "@playwright/mcp@latest"] },
+        },
+      }),
+    () => {
+      const liveTools = [
+        {
+          name: "mcp__playwright__browser_navigate",
+          description: "Navigate to URL",
+          parameters: { type: "object" },
+          exposure: "direct",
+        },
+        {
+          name: "mcp__playwright__browser_close",
+          description: "Close browser",
+          parameters: { type: "object" },
+          exposure: "codemode",
+        },
+      ];
+      const servers = getMcpServers(liveTools);
+      assert.equal(servers.length, 1);
+      const s = servers[0];
+      assert.equal(s.name, "playwright");
+      assert.equal(s.connected, true);
+      assert.equal(s.totalCount, 2);
+      assert.equal(s.directCount, 1);
+      assert.ok(s.tokenEstimate > 0);
+    },
+  );
+});
+
+test("getMcpServers: respects pi enabled: false configuration", () => {
+  withAgentDir(
+    (dir) =>
+      writeConfig(dir, {
+        mcpServers: {
+          offline: { command: "npx", enabled: false },
+        },
+      }),
+    () => {
+      const servers = getMcpServers();
+      assert.equal(servers.length, 1);
+      const s = servers[0];
+      assert.equal(s.name, "offline");
+      assert.equal(s.disabled, true);
+      assert.equal(s.connected, false);
+      assert.equal(s.totalCount, 0);
+    },
+  );
+});
