@@ -9,7 +9,7 @@ export interface MomentumOptions {
 export class ScrollMomentum {
   private tui: any;
   private options: Required<MomentumOptions>;
-  private originalRouteWheel: ((event: any) => void) | null = null;
+  private originalRouteWheel: ((event: any, delta?: number) => void) | null = null;
   private unsubscribeInput: (() => void) | null = null;
   private coastTimer: ReturnType<typeof setInterval> | null = null;
   private lastTime = 0;
@@ -39,11 +39,11 @@ export class ScrollMomentum {
     const origRouteWheel = this.tui.routeWheel;
     this.originalRouteWheel = origRouteWheel;
 
-    this.tui.routeWheel = function (event: any) {
+    this.tui.routeWheel = function (event: any, delta?: number) {
       if (self.disposed || !self.options.enabled) {
-        return origRouteWheel.call(this, event);
+        return origRouteWheel.call(this, event, delta);
       }
-      return self.handleWheel(this, origRouteWheel, event);
+      return self.handleWheel(this, origRouteWheel, event, delta);
     };
 
     if (typeof this.tui.addInputListener === "function") {
@@ -78,7 +78,7 @@ export class ScrollMomentum {
     }
   }
 
-  private handleWheel(tuiInstance: any, origRouteWheel: (event: any) => void, event: any): void {
+  private handleWheel(tuiInstance: any, origRouteWheel: (event: any, delta?: number) => void, event: any, delta?: number): void {
     this.stopCoasting();
 
     const now = Date.now();
@@ -123,7 +123,10 @@ export class ScrollMomentum {
     const prevWheelLines = tuiInstance.wheelScrollLines;
     try {
       tuiInstance.wheelScrollLines = effectiveSpeed;
-      origRouteWheel.call(tuiInstance, event);
+      // In Pi 0.99.0+, routeWheel(event, delta) expects delta lines as the 2nd argument.
+      // If delta is provided, preserve its sign and scale by effectiveSpeed; otherwise use dir * effectiveSpeed.
+      const wheelDelta = delta !== undefined ? (Math.sign(delta) || dir) * effectiveSpeed : dir * effectiveSpeed;
+      origRouteWheel.call(tuiInstance, event, wheelDelta);
     } finally {
       tuiInstance.wheelScrollLines = prevWheelLines;
     }

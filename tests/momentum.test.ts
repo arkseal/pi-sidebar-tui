@@ -21,9 +21,10 @@ function makeMockTui(initialScrollTop = 50) {
   const tui = {
     wheelScrollLines: 3,
     routeWheelCalls: [] as any[],
-    routeWheel(event: any) {
-      this.routeWheelCalls.push({ ...event, lines: this.wheelScrollLines });
-      scrollView.scrollBy(event.direction * this.wheelScrollLines);
+    routeWheel(event: any, delta?: number) {
+      this.routeWheelCalls.push({ ...event, lines: this.wheelScrollLines, delta });
+      const lines = delta !== undefined ? delta : event.direction * this.wheelScrollLines;
+      scrollView.scrollBy(lines);
     },
     getPrimaryScrollView() {
       return scrollView;
@@ -195,3 +196,28 @@ test("Wheel event over sidebar delegates to compositor instead of main viewport"
 
   momentum.dispose();
 });
+
+test("Pi 0.99.0+ two-argument routeWheel(event, delta) forwards and scales delta", () => {
+  const { tui, scrollView } = makeMockTui(100);
+  const momentum = new ScrollMomentum(tui, { baseSpeed: 2, enabled: true });
+  momentum.install();
+
+  // Pi 0.99.0+ calls routeWheel(wheelEvent, wheelDelta) with delta argument
+  tui.routeWheel({ direction: -1, button: 64, x: 10, y: 5 }, -2);
+  assert.equal(tui.routeWheelCalls.length, 1);
+  assert.equal(tui.routeWheelCalls[0].delta, -2);
+  assert.equal(scrollView.scrollTop, 98);
+
+  // Fast consecutive flick
+  tui.routeWheel({ direction: -1, button: 64, x: 10, y: 5 }, -2);
+  assert.equal(tui.routeWheelCalls.length, 2);
+  assert.ok(tui.routeWheelCalls[1].delta < -2, `Expected accelerated delta < -2, got ${tui.routeWheelCalls[1].delta}`);
+
+  // When momentum is disabled, forwards original delta verbatim
+  momentum.setEnabled(false);
+  tui.routeWheel({ direction: 1, button: 65, x: 10, y: 5 }, 5);
+  assert.equal(tui.routeWheelCalls[2].delta, 5);
+
+  momentum.dispose();
+});
+
