@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ScrollMomentum } from "../momentum.ts";
+import { SidebarCompositor } from "../compositor.ts";
 
 function makeMockTui(initialScrollTop = 50) {
   let scrollTop = initialScrollTop;
@@ -220,4 +221,112 @@ test("Pi 0.99.0+ two-argument routeWheel(event, delta) forwards and scales delta
 
   momentum.dispose();
 });
+
+test("Reversing scroll direction over sidebar scrolls sidebar and does not scroll main chat", () => {
+  const { tui, scrollView } = makeMockTui(100);
+  let sidebarScrolledDelta = 0;
+  const mockCompositor = {
+    getSeparatorColumn: () => 50,
+    getScrollTop: () => 10,
+    scrollBy(delta: number) {
+      sidebarScrolledDelta += delta;
+    },
+  };
+
+  const momentum = new ScrollMomentum(tui, { baseSpeed: 1, enabled: true }, () => mockCompositor);
+  momentum.install();
+
+  // 1. Scroll DOWN over sidebar (x = 60)
+  tui.routeWheel({ direction: 1, button: 64, x: 60, y: 5 }, 1);
+  assert.equal(sidebarScrolledDelta, 1, "sidebar should scroll by 1");
+  assert.equal(scrollView.scrollTop, 100, "main chat must not scroll");
+  assert.equal(tui.routeWheelCalls.length, 0);
+
+  // 2. Reverse direction: Scroll UP over sidebar (x = 60)
+  tui.routeWheel({ direction: -1, button: 64, x: 60, y: 5 }, -1);
+  assert.equal(sidebarScrolledDelta, 0, "sidebar should scroll up by 1 (net 0)");
+  assert.equal(scrollView.scrollTop, 100, "main chat must NOT scroll on reversal over sidebar");
+  assert.equal(tui.routeWheelCalls.length, 0, "routeWheelCalls must remain empty for sidebar reversal");
+
+  momentum.dispose();
+});
+
+test("Switching from main chat scroll to sidebar scroll does not scroll main chat on reversal", () => {
+  const { tui, scrollView } = makeMockTui(100);
+  let sidebarScrolledDelta = 0;
+  const mockCompositor = {
+    getSeparatorColumn: () => 50,
+    getScrollTop: () => 0,
+    scrollBy(delta: number) {
+      sidebarScrolledDelta += delta;
+    },
+  };
+
+  const momentum = new ScrollMomentum(tui, { baseSpeed: 1, enabled: true }, () => mockCompositor);
+  momentum.install();
+
+  // 1. User scrolls UP in main chat (x = 20)
+  tui.routeWheel({ direction: -1, button: 64, x: 20, y: 5 }, -1);
+  assert.equal(scrollView.scrollTop, 99, "main chat should scroll up by 1");
+  assert.equal(tui.routeWheelCalls.length, 1);
+
+  // 2. User moves mouse to sidebar and scrolls DOWN (x = 60)
+  // This would previously be flagged as a reversal from -1 to 1 and sent to origRouteWheel!
+  tui.routeWheel({ direction: 1, button: 64, x: 60, y: 5 }, 1);
+  assert.equal(scrollView.scrollTop, 99, "main chat must not scroll when moving to sidebar");
+  assert.equal(sidebarScrolledDelta, 1, "sidebar must scroll");
+  assert.equal(tui.routeWheelCalls.length, 1, "no new main chat scroll calls");
+
+  momentum.dispose();
+});
+
+test("Scrolling over sidebar with momentum disabled delegates to compositor without scrolling main viewport", () => {
+  const { tui, scrollView } = makeMockTui(100);
+  let sidebarScrolledDelta = 0;
+  const mockCompositor = {
+    getSeparatorColumn: () => 50,
+    getScrollTop: () => 0,
+    scrollBy(delta: number) {
+      sidebarScrolledDelta += delta;
+    },
+  };
+
+  const momentum = new ScrollMomentum(tui, { baseSpeed: 2, enabled: false }, () => mockCompositor);
+  momentum.install();
+
+  // Scroll over sidebar with momentum disabled
+  tui.routeWheel({ direction: 1, button: 64, x: 60, y: 5 }, 2);
+  assert.equal(sidebarScrolledDelta, 2, "sidebar should scroll by lines even with momentum disabled");
+  assert.equal(scrollView.scrollTop, 100, "main chat must not scroll when momentum is disabled over sidebar");
+  assert.equal(tui.routeWheelCalls.length, 0);
+
+  // Scroll over main viewport with momentum disabled
+  tui.routeWheel({ direction: -1, button: 64, x: 20, y: 5 }, -2);
+  assert.equal(scrollView.scrollTop, 98, "main chat should scroll when cursor is over main viewport");
+  assert.equal(tui.routeWheelCalls.length, 1);
+
+  momentum.dispose();
+});
+
+test("SidebarCompositor getSeparatorColumn returns mainWidth (0-based separator index)", () => {
+  const term = {
+    columns: 80,
+    rows: 24,
+    write() {},
+  };
+  const mockTui = {
+    terminal: term,
+    mode: "fullscreen",
+    doRender() {},
+  };
+  const comp = new SidebarCompositor(mockTui, () => ({} as any), 30);
+  comp.install();
+
+  // rawCols = 80, sidebarWidth = 30
+  // mainWidth = 80 - 30 - 1 = 49 (indices 0..48 main chat, index 49 separator line)
+  assert.equal(comp.getSeparatorColumn(), 49);
+
+  comp.dispose();
+});
+
 

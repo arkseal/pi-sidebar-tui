@@ -192,7 +192,7 @@ export class SidebarCompositor {
   }
 
   getSeparatorColumn(): number {
-    return this.rawColumns() - this.sidebarWidth;
+    return this.mainWidth();
   }
 
   scrollTo(top: number): void {

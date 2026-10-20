@@ -17,6 +17,7 @@ export class ScrollMomentum {
   private holdTimer: ReturnType<typeof setTimeout> | null = null;
   private lastTime = 0;
   private lastDir = 0;
+  private lastTarget: "sidebar" | "main" | null = null;
   private coastStartTime = 0;
   private isCoasting = false;
   private swipeCount = 1;
@@ -50,7 +51,7 @@ export class ScrollMomentum {
     this.originalRouteWheel = origRouteWheel;
 
     this.tui.routeWheel = function (event: any, delta?: number) {
-      if (self.disposed || !self.options.enabled) {
+      if (self.disposed) {
         return origRouteWheel.call(this, event, delta);
       }
       return self.handleWheel(this, origRouteWheel, event, delta);
@@ -99,6 +100,8 @@ export class ScrollMomentum {
     this.swipeCount = 1;
     this.currentSwipeTicks = 0;
     this.flingVelocity = 2.0;
+    this.lastDir = 0;
+    this.lastTarget = null;
   }
 
   setCompositor(getCompositor: () => any): void {
@@ -111,6 +114,8 @@ export class ScrollMomentum {
       this.stopCoasting();
       this.cancelHoldTimer();
     }
+    this.lastDir = 0;
+    this.lastTarget = null;
   }
 
   handleBrakeInput(): void {
@@ -119,6 +124,7 @@ export class ScrollMomentum {
     this.swipeCount = 1;
     this.currentSwipeTicks = 0;
     this.flingVelocity = 0;
+    this.lastDir = 0;
   }
 
   cancelHoldTimer(): void {
@@ -140,34 +146,64 @@ export class ScrollMomentum {
     this.stopCoasting();
     this.cancelHoldTimer();
 
-    const now = Date.now();
-    const dt = now - this.lastTime;
-    this.lastTime = now;
+    const compositor = this.getCompositor?.();
+    const sepCol = compositor?.getSeparatorColumn?.() ?? -1;
+    const isOverSidebar = Boolean(compositor && typeof event?.x === "number" && sepCol >= 0 && event.x >= sepCol);
+
+    const target: "sidebar" | "main" = isOverSidebar ? "sidebar" : "main";
+    if (this.lastTarget !== target) {
+      this.handleBrakeInput();
+      this.lastTarget = target;
+      this.lastDir = 0;
+    }
 
     const dir = (event?.direction ?? 0) < 0 ? -1 : 1;
 
-    // Direction reversal: immediate brake of previous direction momentum
-    const isReversal = this.lastDir !== 0 && dir !== this.lastDir;
-    if (isReversal) {
-      this.handleBrakeInput();
-      this.lastDir = dir;
-      origRouteWheel.call(tuiInstance, event, dir * this.options.baseSpeed);
+    // When momentum physics is disabled, route directly without velocity/acceleration
+    if (!this.options.enabled) {
+      if (isOverSidebar) {
+        const lines = delta !== undefined ? delta : dir * this.options.baseSpeed;
+        compositor.scrollBy(lines);
+      } else {
+        origRouteWheel.call(tuiInstance, event, delta);
+      }
       return;
     }
+
+    const now = Date.now();
+    const dt = now - this.lastTime;
+    this.lastTime = now;
 
     // Reset on complete pause (> 650ms)
     if (dt > 650) {
       this.swipeCount = 1;
       this.currentSwipeTicks = 1;
       this.flingVelocity = 2.0;
-    } else if (dt > 120) {
+      this.lastDir = 0;
+    }
+
+    // Direction reversal: immediate brake of previous direction momentum
+    const isReversal = this.lastDir !== 0 && dir !== this.lastDir;
+    if (isReversal) {
+      this.handleBrakeInput();
+      this.lastDir = dir;
+      if (isOverSidebar) {
+        compositor.scrollBy(dir * this.options.baseSpeed);
+      } else {
+        const wheelDelta = delta !== undefined ? (Math.sign(delta) || dir) * this.options.baseSpeed : dir * this.options.baseSpeed;
+        origRouteWheel.call(tuiInstance, event, wheelDelta);
+      }
+      return;
+    }
+
+    if (dt > 120 && dt <= 650) {
       // Hand lift between consecutive swipes (120-650ms):
       // Chromium FlingBooster: consecutive swipes in the same direction boost kinetic fling velocity!
       this.swipeCount++;
       this.currentSwipeTicks = 1;
       const boost = this.swipeCount === 2 ? 3.0 : this.swipeCount === 3 ? 5.5 : 9.0;
       this.flingVelocity = Math.min(24.0, this.flingVelocity + boost);
-    } else {
+    } else if (dt <= 120) {
       this.currentSwipeTicks++;
     }
     this.lastDir = dir;
@@ -191,11 +227,6 @@ export class ScrollMomentum {
     }
     this.speedAccumulator = speed;
     const effectiveSpeed = Math.max(1, Math.round(this.speedAccumulator));
-
-    // If mouse cursor is over the sidebar columns, scroll the sidebar instead of the main viewport
-    const compositor = this.getCompositor?.();
-    const sepCol = compositor?.getSeparatorColumn?.() ?? -1;
-    const isOverSidebar = compositor && typeof event?.x === "number" && sepCol > 0 && event.x >= sepCol;
 
     if (isOverSidebar) {
       compositor.scrollBy(dir * effectiveSpeed);
@@ -305,6 +336,7 @@ export class ScrollMomentum {
   }
 
   private startCoastingSidebar(compositor: any, dir: number, velocity: number, swipeCount = 1): void {
+    if (!compositor) return;
     this.isCoasting = true;
     this.coastStartTime = Date.now();
     let friction = 0.88;
