@@ -129,7 +129,7 @@ export function renderSessionPanel(ctx: SidebarContext, width: number): string[]
   // Two-column stats
   // Col1: time, last, speed, turns, left
   // Col2: in, out, total, cache, cost
-  const elapsed = Date.now() - ctx.sessionStartMs;
+  const elapsed = Math.max(0, ctx.activeRunMs ?? 0);
   const avgTps = ctx.liveTps ?? ctx.lastTps;
   const tokenTotal = ctx.tokensIn + ctx.tokensOut + ctx.cacheRead + ctx.cacheWrite;
   const totalIn = ctx.tokensIn + ctx.cacheRead;
@@ -142,7 +142,7 @@ export function renderSessionPanel(ctx: SidebarContext, width: number): string[]
     : COLORS.muted;
 
   const col1: [string, string, string][] = [
-    ["time", elapsed >= 1000 ? formatDuration(elapsed) : NA, COLORS.muted],
+    ["time", formatDuration(elapsed), COLORS.muted],
     ["last", ctx.lastTurnMs !== null ? formatDuration(ctx.lastTurnMs) : NA, COLORS.muted],
     ["speed", avgTps !== null ? `${avgTps} tok/s` : NA, COLORS.muted],
     ["turns", ctx.turnCount > 0 ? String(ctx.turnCount) : NA, COLORS.muted],
@@ -164,7 +164,7 @@ export function renderSessionPanel(ctx: SidebarContext, width: number): string[]
   const v2W = Math.max(0, c2W - 6);
 
   // Column sub-headers with separator
-  const h1 = "Stats".padEnd(c1W);
+  const h1 = trunc("All-time", c1W).padEnd(c1W);
   const h2 = "Tokens";
   lines.push(dim(" " + h1 + h2));
   lines.push(dim(" " + "─".repeat(Math.max(0, usable - 1))));

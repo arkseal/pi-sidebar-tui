@@ -83,6 +83,30 @@ test("session panel: header line contains 'Session'", () => {
   assert.ok(lines.map(strip).some(l => l.includes("Session")));
 });
 
+test("session panel: time uses active runtime, never process uptime", () => {
+  const ctx = makeCtx({ activeRunMs: 65_000, sessionStartMs: Date.now() - 86_400_000 });
+  const lines = renderSessionPanel(ctx, 45).map(strip);
+  const time = lines.find(l => /^ time\s/.test(l));
+  assert.match(time!, /1m5s/);
+  assert.ok(!time!.includes("24h"));
+  assert.ok(lines.some(l => l.includes("All-time")));
+});
+
+test("session panel: idle rerenders do not advance the time stat", () => {
+  const ctx = makeCtx({ activeRunMs: 123_000 });
+  const time = () => renderSessionPanel(ctx, 45).map(strip).find(l => /^ time\s/.test(l));
+  assert.equal(time(), time());
+  assert.match(time()!, /2m3s/);
+});
+
+test("session panel: missing or zero active runtime shows zero, not uptime", () => {
+  for (const activeRunMs of [undefined, 0]) {
+    const ctx = makeCtx({ activeRunMs, sessionStartMs: 0 });
+    const time = renderSessionPanel(ctx, 45).map(strip).find(l => /^ time\s/.test(l));
+    assert.match(time!, /0s/);
+  }
+});
+
 // ─── Session panel: context bar ───────────────────────────────────────────────
 
 test("session panel: context renders as fill bar with rounded pct label", () => {

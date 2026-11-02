@@ -55,7 +55,10 @@ export interface SidebarContext {
   turnCount: number;
   activeTool: { name: string; startedAt: number } | null;
   autoCompactEnabled: boolean | null;
-  sessionStartMs: number;
+  /** Cumulative active agent runtime; idle and offline time are excluded. */
+  activeRunMs?: number;
+  /** @deprecated Uptime is no longer displayed; retained for panel integrations. */
+  sessionStartMs?: number;
   mcpServers: McpServerInfo[];
   modelProvider: string | null;
   cavemanLevel: string | null;

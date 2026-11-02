@@ -273,3 +273,54 @@ test("SidebarCompositor does not oscillate between last line and indicator on re
   comp.dispose();
   clearRegisteredSidebarPanels();
 });
+
+test("SidebarCompositor dispatches mouse click to panel onClick handler", () => {
+  let clickedLine: string | null = null;
+  let clickedIndex: number | null = null;
+
+  registerSidebarPanel({
+    id: "clickable-panel",
+    order: 15,
+    render: () => ["Header", "Clickable Item", "Footer"],
+    onClick: (text, idx) => {
+      clickedLine = text;
+      clickedIndex = idx;
+    },
+  });
+
+  const mockTui: any = {
+    mode: "fullscreen",
+    terminal: { rows: 20, columns: 80, write: () => {} },
+    handleMouseEvent: () => {},
+  };
+
+  const comp = new SidebarCompositor(mockTui, () => makeCtx({ cwd: "" }), 30);
+  comp.install();
+  comp.paint();
+
+  const lines = renderSidebar(makeCtx({ cwd: "" }), 30);
+  const targetRow = lines.findIndex(l => l.includes("Clickable Item"));
+  assert.ok(targetRow >= 0, "should find Clickable Item in rendered lines");
+
+  // Press down (raw.y is 0-based)
+  mockTui.handleMouseEvent({
+    x: 55,
+    y: targetRow,
+    button: 0,
+    release: false,
+  });
+
+  // Release (click complete)
+  mockTui.handleMouseEvent({
+    x: 55,
+    y: targetRow,
+    button: 0,
+    release: true,
+  });
+
+  assert.equal(clickedLine, "Clickable Item");
+  assert.equal(clickedIndex, 1);
+
+  comp.dispose();
+  clearRegisteredSidebarPanels();
+});

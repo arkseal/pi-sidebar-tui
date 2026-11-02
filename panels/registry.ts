@@ -5,6 +5,7 @@ export interface DynamicSidebarPanel {
   id: string;
   order?: number; // lower numbers render earlier. Default: 20 (between session at 10 and mcp at 30)
   render: (ctx: SidebarContext, width: number) => string[];
+  onClick?: (lineText: string, lineIndex: number) => void;
 }
 
 export interface PiSidebarGlobalAPI {

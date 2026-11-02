@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **Active runtime**: The sidebar time stat now counts active agent runs instead of process uptime. Idle/offline time and blocking user prompts are excluded.
+- **Durable totals**: The All-time stats grid persists runtime, token/cache usage, cost, turns, last-turn duration, and last measured speed across restarts, reloads, and new sessions. Atomic per-writer snapshots support concurrent Pi instances without overwriting totals.
+
+### Fixed
+
+- Replaying a resumed session no longer adds cache-write tokens repeatedly. History seeds persistent totals only once, and model turns are counted consistently.
+- Child-agent usage is not persisted twice, and sidebar render hooks are released explicitly during shutdown/reload.
+- Page scrolling shortcuts use Pi's canonical `pageUp` / `pageDown` key IDs.
+
 ## [1.7.2] - 2026-09-07
 
 ### Added

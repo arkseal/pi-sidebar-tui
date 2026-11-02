@@ -97,6 +97,6 @@ test("sidebar scrolling shortcuts do not conflict with built-in pi shortcuts", a
   assert.ok(shortcuts.get("alt+shift+down"), "alt+shift+down should be registered");
   assert.ok(shortcuts.get("ctrl+alt+up"), "ctrl+alt+up should be registered");
   assert.ok(shortcuts.get("ctrl+alt+down"), "ctrl+alt+down should be registered");
-  assert.ok(shortcuts.get("alt+pageup"), "alt+pageup should be registered");
-  assert.ok(shortcuts.get("alt+pagedown"), "alt+pagedown should be registered");
+  assert.ok(shortcuts.get("alt+pageUp"), "alt+pageUp should be registered");
+  assert.ok(shortcuts.get("alt+pageDown"), "alt+pageDown should be registered");
 });

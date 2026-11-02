@@ -10,6 +10,7 @@ import { loadCavemanConfig, resolveCavemanLevel, cavemanInterval, type CavemanCo
 import { setPiTheme } from "./colors.ts";
 import { setSidebarRenderCallback } from "./panels/registry.ts";
 import { ScrollMomentum } from "./momentum.ts";
+import { SidebarStatsTracker, emptySidebarStats } from "./stats.ts";
 
 const TODO_TOOL_PATTERN = /todo/i;
 const WRITE_TOOLS = new Set(["write", "edit", "bash", "computer"]);
@@ -30,21 +31,13 @@ let thinkingLevel: string | null = null;
 let contextTokens: number | null = null;
 let contextPercent: number | null = null;
 let contextWindow: number | null = null;
-let tokensIn = 0;
-let tokensOut = 0;
-let cacheRead = 0;
-let cacheWrite = 0;
-let sessionCost = 0;
-let turnCount = 0;
+let statsTracker: SidebarStatsTracker | null = null;
 let activeTool: { name: string; startedAt: number } | null = null;
 let autoCompactEnabled: boolean | null = null;
-let sessionStartMs = Date.now();
 let modelProvider: string | null = null;
-let agentStartMs: number | null = null;
+let turnStartMs: number | null = null;
 let msgStartMs: number | null = null;
 let liveTps: number | null = null;
-let lastTps: number | null = null;
-let lastTurnMs: number | null = null;
 let ctxSamples: CtxSample[] = [];
 let tpsSamples: { t: number; tokens: number }[] = [];
 const CTX_SAMPLE_MAX = 10;
@@ -152,15 +145,9 @@ function buildSidebarContext(cwd: string | undefined): SidebarContext {
     contextTokens,
     contextPercent,
     contextWindow,
-    tokensIn,
-    tokensOut,
-    cacheRead,
-    cacheWrite,
-    sessionCost,
-    turnCount,
+    ...(statsTracker?.snapshot ?? emptySidebarStats()),
     activeTool,
     autoCompactEnabled,
-    sessionStartMs,
     mcpServers: getMcpServers(currentPi?.getAllTools?.()),
     modelProvider,
     cavemanLevel,
@@ -168,14 +155,13 @@ function buildSidebarContext(cwd: string | undefined): SidebarContext {
     agentActive,
     spinnerFrame: activityFrame,
     liveTps,
-    lastTps,
-    lastTurnMs,
     ctxSamples,
     showSubagents: subagentsEnabled,
   };
 }
 
 function recordCtxSample(tokens: number): void {
+  const turnCount = statsTracker?.snapshot.turnCount ?? 0;
   const last = ctxSamples[ctxSamples.length - 1];
   if (last && last.turns === turnCount) {
     last.tokens = tokens; // dedupe: one sample per turn
@@ -233,6 +219,15 @@ export default function piSidebar(pi: ExtensionAPI) {
   let tuiRef: any = null;
   let compositorRef: SidebarCompositor | null = null;
   let momentumRef: ScrollMomentum | null = null;
+  let uiPromptDepth = 0;
+  let statsSaveWarningShown = false;
+
+  const saveStats = (ctx: any) => {
+    if (statsTracker && !statsTracker.save() && !statsSaveWarningShown) {
+      statsSaveWarningShown = true;
+      ctx.ui?.notify?.("Sidebar statistics could not be saved. Check the sidebar-stats directory permissions.", "warning");
+    }
+  };
 
   const stopCavemanAnim = () => {
     if (cavemanTimer) { clearInterval(cavemanTimer); cavemanTimer = null; }
@@ -313,41 +308,64 @@ export default function piSidebar(pi: ExtensionAPI) {
     contextPercent = null;
     contextWindow = null;
     ctxSamples = [];
-    sessionStartMs = Date.now();
+    agentActive = false;
+    uiPromptDepth = 0;
+    statsSaveWarningShown = false;
+    // Child agents report their usage to the parent. Persisting both the child
+    // and the parent's subagent:stats event would double-count global totals.
+    statsTracker = Number(process.env.PI_SUBAGENT_DEPTH ?? 0) > 0 ? null : new SidebarStatsTracker();
     cavemanCfg = loadCavemanConfig();
     refreshCavemanLevel();
     stopCavemanAnim();
     if (sessionTimerHandle) { clearInterval(sessionTimerHandle); sessionTimerHandle = null; }
-    if ((ctx as any).hasUI) {
-      sessionTimerHandle = setInterval(() => requestRender?.(), 30_000);
-      sessionTimerHandle.unref?.();
-    }
+    // Checkpoint active work, including non-TUI runs. No idle/offline time is saved.
+    sessionTimerHandle = setInterval(() => {
+      if (agentActive) {
+        saveStats(ctx);
+        requestRender?.();
+      }
+    }, 10_000);
+    sessionTimerHandle.unref?.();
     activeTool = null;
-    turnCount = 0;
+    turnStartMs = null;
+    msgStartMs = null;
+    liveTps = null;
+    tpsSamples = [];
     autoCompactEnabled = (ctx as any).settingsManager?.getCompactionSettings?.()?.enabled ?? null;
-    // Seed usage totals from existing session entries (handles resume)
-    { let inSum = 0, outSum = 0, cacheSum = 0, costSum = 0, turns = 0;
+    // Bootstrap once from the current branch. Never replay history into durable
+    // totals on /reload, /resume, or /new; that would count the same usage twice.
+    if (statsTracker && !statsTracker.hasStoredStats) {
       for (const e of (ctx.sessionManager.getBranch?.() ?? [])) {
         const m = (e as any).message;
-        if ((e as any).type !== "message") continue;
-        if (m?.role === "user") { turns++; continue; }
-        if (m?.role !== "assistant") continue;
-        if (m?.stopReason === "error" || m?.stopReason === "aborted") continue;
-        inSum += m.usage?.input ?? 0;
-        outSum += m.usage?.output ?? 0;
-        cacheSum += m.usage?.cacheRead ?? 0;
-        cacheWrite += m.usage?.cacheWrite ?? 0;
-        costSum += m.usage?.cost?.total ?? 0;
+        if ((e as any).type !== "message" || m?.role !== "assistant") continue;
+        statsTracker.addUsage(m.usage ?? {});
+        statsTracker.incrementTurns();
       }
-      tokensIn = inSum; tokensOut = outSum; cacheRead = cacheSum; sessionCost = costSum;
-      turnCount = turns;
     }
+    saveStats(ctx);
     invalidateWorkspaceCache();
     currentCwd = (ctx as any).cwd;
     updateContextUsage(ctx);
     // Prefer live API; fall back to last thinking_level_change entry in history
     // Session history is authoritative for resumed sessions; fall back to live API
     thinkingLevel = inferThinkingLevel(ctx.sessionManager) ?? pi.getThinkingLevel?.() ?? null;
+
+    // Subagent totals are durable even when the sidebar is hidden or in JSON mode.
+    if (unsubscribeSubagentStats) { unsubscribeSubagentStats(); unsubscribeSubagentStats = null; }
+    if (pi.events) {
+      unsubscribeSubagentStats = pi.events.on("subagent:stats", (data: any) => {
+        const st = data?.stats;
+        if (st) {
+          statsTracker?.addUsage({
+            input: st.tokensIn, output: st.tokensOut,
+            cacheRead: st.cacheRead, cacheWrite: st.cacheWrite,
+            cost: { total: st.cost },
+          });
+          saveStats(ctx);
+          requestRender?.();
+        }
+      });
+    }
 
     const hasUI = (ctx as any).hasUI;
     if (!hasUI) return;
@@ -380,19 +398,6 @@ export default function piSidebar(pi: ExtensionAPI) {
       unsubscribeMcpStatus = pi.events.on("pi-mcp-adapter/status/v1", () => {
         invalidateMcpCache();
         requestRender?.();
-      });
-
-      if (unsubscribeSubagentStats) { unsubscribeSubagentStats(); unsubscribeSubagentStats = null; }
-      unsubscribeSubagentStats = pi.events.on("subagent:stats", (data: any) => {
-        const st = data?.stats;
-        if (st) {
-          tokensIn += st.tokensIn ?? 0;
-          tokensOut += st.tokensOut ?? 0;
-          cacheRead += st.cacheRead ?? 0;
-          cacheWrite += st.cacheWrite ?? 0;
-          sessionCost += st.cost ?? 0;
-          requestRender?.();
-        }
       });
     }
 
@@ -458,10 +463,18 @@ export default function piSidebar(pi: ExtensionAPI) {
     requestRender?.();
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (_event, ctx) => {
+    statsTracker?.stopRun();
+    saveStats(ctx);
+    statsTracker = null;
+    uiPromptDepth = 0;
     setSidebarRenderCallback(null);
     momentumRef?.dispose();
     momentumRef = null;
+    compositorRef?.dispose();
+    compositorRef = null;
+    requestRender = null;
+    tuiRef = null;
     if (sessionTimerHandle) { clearInterval(sessionTimerHandle); sessionTimerHandle = null; }
     if (unsubscribeMcpStatus) { unsubscribeMcpStatus(); unsubscribeMcpStatus = null; }
     if (unsubscribeSubagentStats) { unsubscribeSubagentStats(); unsubscribeSubagentStats = null; }
@@ -469,18 +482,10 @@ export default function piSidebar(pi: ExtensionAPI) {
     stopActivityAnim();
     agentActive = false;
     cavemanLevel = null;
-    tokensIn = 0;
-    tokensOut = 0;
-    cacheRead = 0;
-    cacheWrite = 0;
-    sessionCost = 0;
-    turnCount = 0;
     activeTool = null;
-    agentStartMs = null;
+    turnStartMs = null;
     msgStartMs = null;
     liveTps = null;
-    lastTps = null;
-    lastTurnMs = null;
     ctxSamples = [];
     tpsSamples = [];
     sessionTitle = null;
@@ -575,23 +580,22 @@ export default function piSidebar(pi: ExtensionAPI) {
     currentCwd = (ctx as any).cwd;
     const usage = (event as any).message?.usage;
     if (usage && (event as any).message?.role === "assistant") {
-      const stopReason = (event as any).message?.stopReason;
-      if (stopReason !== "error" && stopReason !== "aborted") {
-        tokensIn += usage.input ?? 0;
-        tokensOut += usage.output ?? 0;
-        cacheRead += usage.cacheRead ?? 0;
-        cacheWrite += usage.cacheWrite ?? 0;
-        sessionCost += usage.cost?.total ?? 0;
-        const out = usage.output ?? 0;
-        const elapsed = msgStartMs !== null ? Date.now() - msgStartMs : null;
-        if (elapsed !== null && elapsed > 50 && out > 0) {
-          lastTps = Math.round(out / (elapsed / 1000));
-        }
-        liveTps = null;
-        msgStartMs = null;
+      // Reported usage can still be billable on an aborted/failed response.
+      statsTracker?.addUsage(usage);
+      const out = usage.output ?? 0;
+      const elapsed = msgStartMs !== null ? Date.now() - msgStartMs : null;
+      if (elapsed !== null && elapsed > 50 && out > 0) {
+        statsTracker?.setLastTps(Math.round(out / (elapsed / 1000)));
       }
+      liveTps = null;
+      msgStartMs = null;
+      saveStats(ctx);
     }
     requestRender?.();
+  });
+
+  pi.on("turn_start", async () => {
+    turnStartMs = performance.now();
   });
 
   pi.on("turn_end", async (_event, ctx) => {
@@ -599,16 +603,19 @@ export default function piSidebar(pi: ExtensionAPI) {
     updateContextUsage(ctx);
     invalidateWorkspaceCache();
     refreshCavemanLevel();
-    turnCount++;
+    statsTracker?.incrementTurns();
     activeTool = null;
-    if (agentStartMs !== null) {
-      lastTurnMs = Date.now() - agentStartMs;
-      agentStartMs = null;
+    if (turnStartMs !== null) {
+      statsTracker?.setLastTurnMs(Math.max(0, performance.now() - turnStartMs));
+      turnStartMs = null;
     }
+    saveStats(ctx);
     requestRender?.();
   });
 
   pi.on("agent_end", async (_event, ctx) => {
+    statsTracker?.stopRun();
+    saveStats(ctx);
     currentCwd = (ctx as any).cwd;
     updateContextUsage(ctx);
     invalidateWorkspaceCache();
@@ -624,8 +631,6 @@ export default function piSidebar(pi: ExtensionAPI) {
     else if (m?.id) currentModel = m.id;
     msgStartMs = null;
     liveTps = null;
-    lastTps = null;
-    lastTurnMs = null;
     tpsSamples = [];
     updateContextUsage(ctx);
     requestRender?.();
@@ -633,13 +638,40 @@ export default function piSidebar(pi: ExtensionAPI) {
 
   pi.on("agent_start", async (_event, ctx) => {
     currentCwd = (ctx as any).cwd;
-    agentStartMs = Date.now();
+    if (uiPromptDepth === 0) statsTracker?.startRun();
+    turnStartMs = null;
     msgStartMs = null;
     updateContextUsage(ctx);
     refreshCavemanLevel();
     startCavemanAnim();
     agentActive = true;
     startActivityAnim();
+    requestRender?.();
+  });
+
+  // Waiting for a user confirmation is not active agent work. Nested prompts
+  // must all close before the timer resumes, and abort/end must not restart it.
+  pi.on("ui_prompt_start", async (_event, ctx) => {
+    uiPromptDepth++;
+    statsTracker?.stopRun();
+    saveStats(ctx);
+    requestRender?.();
+  });
+
+  pi.on("ui_prompt_end", async () => {
+    uiPromptDepth = Math.max(0, uiPromptDepth - 1);
+    if (agentActive && uiPromptDepth === 0) statsTracker?.startRun();
+    requestRender?.();
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    // Idempotent fallback for cancellation/error paths without another run.
+    statsTracker?.stopRun();
+    saveStats(ctx);
+    agentActive = false;
+    activeTool = null;
+    stopActivityAnim();
+    stopCavemanAnim();
     requestRender?.();
   });
 
@@ -828,14 +860,14 @@ export default function piSidebar(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerShortcut("alt+pageup", {
+  pi.registerShortcut("alt+pageUp", {
     description: "Scroll sidebar page up",
     handler: async () => {
       compositorRef?.scrollBy(-10);
     },
   });
 
-  pi.registerShortcut("alt+pagedown", {
+  pi.registerShortcut("alt+pageDown", {
     description: "Scroll sidebar page down",
     handler: async () => {
       compositorRef?.scrollBy(10);

@@ -1,6 +1,6 @@
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, stripTerminalSequences } from "@earendil-works/pi-tui";
 import type { SidebarContext } from "./types.ts";
-import { renderSidebar } from "./sidebar.ts";
+import { renderSidebar, renderSidebarWithMeta, type RenderedPanelLineMeta } from "./sidebar.ts";
 import { dim } from "./colors.ts";
 
 // No background by default so terminal transparency shows through.
@@ -42,6 +42,12 @@ export class SidebarCompositor {
   private originalDoRender: ((...args: any[]) => any) | null = null;
   private originalWrite: (data: string) => void;
   private disposed = false;
+  private onScreenLines: string[] = [];
+  private onScreenPanels: Array<import("./panels/registry.ts").DynamicSidebarPanel | undefined> = [];
+  private onScreenLineIndices: number[] = [];
+  private lastVisiblePanelRows = 0;
+  private pressInSidebarRow: number | null = null;
+  private originalHandleMouseEvent: any = null;
 
   private readonly sidebarWidth: number;
 
@@ -166,6 +172,34 @@ export class SidebarCompositor {
         return result;
       };
     }
+
+    const origHandleMouseEvent = this.tui.handleMouseEvent;
+    if (typeof origHandleMouseEvent === "function") {
+      this.originalHandleMouseEvent = origHandleMouseEvent;
+      this.tui.handleMouseEvent = function (raw: any) {
+        if (self.disposed) return origHandleMouseEvent.call(this, raw);
+        const rawCols = self.rawColumns();
+        const sidebarStartCol = Math.max(0, rawCols - self.sidebarWidth - 1);
+        const isRelease = Boolean(raw.release);
+        const button = raw.button & 3; // 0 = left button
+
+        if (raw.x >= sidebarStartCol) {
+          const row = raw.y; // raw.y is 0-based screen row
+          if (!isRelease) {
+            self.pressInSidebarRow = row;
+          } else {
+            const pressRow = self.pressInSidebarRow;
+            self.pressInSidebarRow = null;
+            if (pressRow !== null && Math.abs(pressRow - row) <= 1 && button === 0) {
+              if (self.handleClickAt(row)) {
+                return;
+              }
+            }
+          }
+        }
+        return origHandleMouseEvent.call(this, raw);
+      };
+    }
   }
 
   private computeMaxScrollTop(): number {
@@ -251,6 +285,57 @@ export class SidebarCompositor {
     const padding = Math.max(0, width - visibleWidth(content));
     return `${SIDEBAR_BG}${content}${" ".repeat(padding)}${BG_RESET}`;
   }
+  handleClickAt(screenRow: number): boolean {
+    if (!this.onScreenLines || screenRow < 0 || screenRow >= this.onScreenLines.length) {
+      return false;
+    }
+
+    const rawLine = this.onScreenLines[screenRow] ?? "";
+    const cleanLine = stripTerminalSequences(rawLine).trim();
+    const panel = this.onScreenPanels?.[screenRow];
+
+    // Click on scroll indicators
+    if (cleanLine.startsWith("▼") && cleanLine.includes("line")) {
+      this.scrollTop = Math.min(this.maxScrollTop, this.scrollTop + 5);
+      this.paint();
+      return true;
+    }
+    if (cleanLine.startsWith("▲") && cleanLine.includes("line")) {
+      this.scrollTop = Math.max(0, this.scrollTop - 5);
+      this.paint();
+      return true;
+    }
+
+    let handled = false;
+    if (typeof panel?.onClick === "function") {
+      try {
+        const lineIdx = this.onScreenLineIndices?.[screenRow] ?? 0;
+        panel.onClick(cleanLine, lineIdx);
+        handled = true;
+      } catch {}
+    }
+    if (!handled) {
+      if (
+        cleanLine.includes("more subagents") ||
+        cleanLine.includes("Show less") ||
+        cleanLine.includes("show less") ||
+        cleanLine.includes("/subagents more")
+      ) {
+        const g = globalThis as any;
+        if (typeof g.__PI_SUBAGENTS_TRACKER__?.toggleSidebarShowAll === "function") {
+          g.__PI_SUBAGENTS_TRACKER__.toggleSidebarShowAll();
+          handled = true;
+        }
+      }
+    }
+
+    if (handled) {
+      this.paint();
+      return true;
+    }
+
+    return false;
+  }
 
   private paintInternal(forceFull: boolean, standalone: boolean): void {
     if (this.disposed) return;
@@ -260,9 +345,8 @@ export class SidebarCompositor {
     const sw = this.sidebarWidth;
     const sepCol = rawCols - sw;
     const sidebarCol = sepCol + 1;
-
     const ctx = this.getCtx();
-    const lines = renderSidebar(ctx, sw);
+    const { lines, meta } = renderSidebarWithMeta(ctx, sw);
     const totalLines = lines.length;
 
     // Build the full set of formatted lines (panel rows + bottom cwd row).
@@ -276,8 +360,11 @@ export class SidebarCompositor {
 
     const hasCwd = Boolean(cwd);
     const visiblePanelRows = hasCwd ? Math.max(1, rawRows - 1) : rawRows;
+    this.lastVisiblePanelRows = visiblePanelRows;
 
     let panelLinesToRender: string[];
+    const onScreenPanels: Array<import("./panels/registry.ts").DynamicSidebarPanel | undefined> = [];
+    const onScreenLineIndices: number[] = [];
 
     if (totalLines <= visiblePanelRows) {
       this.maxScrollTop = 0;
@@ -285,12 +372,11 @@ export class SidebarCompositor {
       panelLinesToRender = [];
       for (let i = 0; i < visiblePanelRows; i++) {
         panelLinesToRender.push(lines[i] ?? "");
+        onScreenPanels.push(meta[i]?.panel);
+        onScreenLineIndices.push(meta[i]?.lineIndex ?? 0);
       }
     } else {
       // Content overflows visible rows.
-      // When scrolled to the bottom, 1 row is reserved for the top indicator, leaving
-      // (visiblePanelRows - 1) rows for content to reach the exact last line.
-      // Therefore maxScrollTop is constant: totalLines - (visiblePanelRows - 1).
       const contentRowsAtBottom = Math.max(1, visiblePanelRows - 1);
       this.maxScrollTop = Math.max(0, totalLines - contentRowsAtBottom);
       this.scrollTop = Math.max(0, Math.min(this.maxScrollTop, this.scrollTop));
@@ -301,37 +387,54 @@ export class SidebarCompositor {
       panelLinesToRender = [];
 
       if (isAtTop) {
-        // At top: no top indicator; last panel row shows bottom indicator
         const contentRows = Math.max(1, visiblePanelRows - 1);
         for (let i = 0; i < contentRows; i++) {
           panelLinesToRender.push(lines[i] ?? "");
+          onScreenPanels.push(meta[i]?.panel);
+          onScreenLineIndices.push(meta[i]?.lineIndex ?? 0);
         }
         const linesBelow = Math.max(1, totalLines - contentRows);
         panelLinesToRender.push(dim(` ▼ ${linesBelow} line${linesBelow === 1 ? "" : "s"} below`));
+        onScreenPanels.push(undefined);
+        onScreenLineIndices.push(0);
       } else if (isAtBottom) {
-        // At bottom: top indicator shown; no bottom indicator so the actual last line is visible
         panelLinesToRender.push(dim(` ▲ ${this.scrollTop} line${this.scrollTop === 1 ? "" : "s"} above`));
+        onScreenPanels.push(undefined);
+        onScreenLineIndices.push(0);
         const contentRows = Math.max(1, visiblePanelRows - 1);
         for (let i = 0; i < contentRows; i++) {
           const idx = this.scrollTop + i;
           panelLinesToRender.push(lines[idx] ?? "");
+          onScreenPanels.push(meta[idx]?.panel);
+          onScreenLineIndices.push(meta[idx]?.lineIndex ?? 0);
         }
       } else {
-        // In the middle: both top and bottom indicators shown
         panelLinesToRender.push(dim(` ▲ ${this.scrollTop} line${this.scrollTop === 1 ? "" : "s"} above`));
+        onScreenPanels.push(undefined);
+        onScreenLineIndices.push(0);
         const contentRows = Math.max(1, visiblePanelRows - 2);
         for (let i = 0; i < contentRows; i++) {
           const idx = this.scrollTop + i;
           panelLinesToRender.push(lines[idx] ?? "");
+          onScreenPanels.push(meta[idx]?.panel);
+          onScreenLineIndices.push(meta[idx]?.lineIndex ?? 0);
         }
         const linesBelow = Math.max(1, totalLines - (this.scrollTop + contentRows));
         panelLinesToRender.push(dim(` ▼ ${linesBelow} line${linesBelow === 1 ? "" : "s"} below`));
+        onScreenPanels.push(undefined);
+        onScreenLineIndices.push(0);
       }
 
       while (panelLinesToRender.length < visiblePanelRows) {
         panelLinesToRender.push("");
+        onScreenPanels.push(undefined);
+        onScreenLineIndices.push(0);
       }
     }
+
+    this.onScreenLines = panelLinesToRender;
+    this.onScreenPanels = onScreenPanels;
+    this.onScreenLineIndices = onScreenLineIndices;
 
     const formattedLines: string[] = [];
     for (let i = 0; i < visiblePanelRows; i++) {
@@ -406,6 +509,11 @@ export class SidebarCompositor {
 
     if (this.originalDoRender !== null) {
       this.tui.doRender = this.originalDoRender;
+    }
+
+    if (this.originalHandleMouseEvent !== null && typeof this.tui.handleMouseEvent === "function") {
+      this.tui.handleMouseEvent = this.originalHandleMouseEvent;
+      this.originalHandleMouseEvent = null;
     }
   }
 }

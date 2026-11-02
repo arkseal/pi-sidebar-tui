@@ -8,14 +8,14 @@ Displays a real-time sidebar panel inside the pi terminal UI showing session met
 
 ### Session Panel
 - Session title (auto-inferred from first user message with LLM fallback, or manually set)
-- Session elapsed time (updated every 30 seconds)
+- Cumulative **active agent runtime**, not time since opening Pi (idle/offline time and blocking user confirmations are excluded)
 - Active tool indicator with live elapsed timer
 - Current model name with thinking level (`think:high`, `think:medium`, etc.)
 - Context window usage: `tokens / max_window (pct%)` — fill bar escalates color by usage **and** by pace
 - Context estimate: `left ≈Nt` — turns remaining until the window fills at recent growth rate (`∞` when flat, `—` until enough data); colored muted ≥20t / accent 5–19t / warning red <5t
 - Auto-compact status indicator
-- Token input/output totals + session cost
-- Cache hit percentage + turn count
+- Persistent all-time token input/output totals, cost, cache hit percentage, and model-turn count
+- Runtime, usage, last-turn duration, and last measured speed survive closing Pi, `/reload`, and new sessions
 - Live tokens-per-second (tok/s) via 2-second sliding window
 - Session ID display
 - Theme-aware colors (delegates to pi Theme API when available)
@@ -77,6 +77,18 @@ Set custom session title:
 /session-title "My feature implementation"
 ```
 
+## Persistent Stats
+
+The **All-time / Tokens** grid is cumulative across top-level Pi sessions and workspaces using the same agent directory. Model, context usage, context-pace estimates, active tools, and the live streaming speed remain session-specific.
+
+`time` counts the main agent's active runs (including model requests and tool execution), pauses for blocking user prompts, and stops when the run ends or is aborted. It never includes time spent idle at the editor or time while Pi is closed. `last` is the last model turn's duration; `speed` shows live tok/s while streaming, otherwise the last measured speed.
+
+Stats are saved under `<agent-dir>/sidebar-stats/` (normally `~/.pi/agent/sidebar-stats/`) after usage/turn updates, at run end, every 10 seconds during active work, and on clean shutdown. Atomic per-process snapshots prevent parallel Pi instances from overwriting each other's contributions; totals are combined at startup. Child-agent usage reported to the parent is not also persisted by the child. A forced kill can lose work since the latest checkpoint, but cannot add offline time.
+
+On the first run only, usage and model-turn counts from the current session branch seed the totals. Older active runtime cannot be reconstructed reliably and starts at zero. Reloading/resuming history never counts that usage twice. Damaged snapshot files are skipped, and write failures warn without breaking the sidebar.
+
+To reset the totals, close all Pi instances and remove the stats directory. Set `PI_SIDEBAR_STATS_DIR` to use a different storage location.
+
 ## Configuration
 
 | Env var | Default | Description |
@@ -85,6 +97,7 @@ Set custom session title:
 | `PI_SIDEBAR_SCROLL_SPEED` | `1` | Number of lines to scroll per wheel/trackpad tick in fullscreen mode (1–20). |
 | `PI_SIDEBAR_MOMENTUM` | `1` | Enable scroll momentum/velocity acceleration and inertial glide (`1`/`true` or `0`/`false`). |
 | `PI_SIDEBAR_SUBAGENTS` | `1` | Show dynamic subagents panel in sidebar (`1`/`true` or `0`/`false`). |
+| `PI_SIDEBAR_STATS_DIR` | `<agent-dir>/sidebar-stats/` | Persistent cumulative stats directory; respects `PI_CODING_AGENT_DIR` by default. |
 
 ## Requirements
 
@@ -108,6 +121,7 @@ pi-sidebar-tui/
 ├── compositor.ts         # Terminal compositor for right-column layout
 ├── colors.ts             # ANSI color helpers, formatting utilities
 ├── types.ts              # TypeScript type definitions
+├── stats.ts              # Active-run timer and atomic persistent cumulative stats
 ├── mcp.ts                # MCP server discovery and status
 ├── workspace.ts          # Git workspace state tracking
 ├── panels/

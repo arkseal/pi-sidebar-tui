@@ -6,38 +6,63 @@ import { renderWorkspacePanel } from "./panels/workspace.ts";
 import { renderMcpPanel } from "./panels/mcp.ts";
 import { getRegisteredSidebarPanels } from "./panels/registry.ts";
 
-export function renderSidebar(ctx: SidebarContext, width: number): string[] {
+export interface RenderedPanelLineMeta {
+  panel?: import("./panels/registry.ts").DynamicSidebarPanel;
+  lineIndex?: number;
+}
+
+export function renderSidebarWithMeta(
+  ctx: SidebarContext,
+  width: number
+): { lines: string[]; meta: RenderedPanelLineMeta[] } {
   const safeWidth = Math.max(1, width);
 
   const rawDynamicPanels = getRegisteredSidebarPanels();
   const dynamicPanels = ctx.showSubagents === false
     ? rawDynamicPanels.filter(p => p.id !== "subagents")
     : rawDynamicPanels;
-  const earlyPanels = dynamicPanels.filter(p => (p.order ?? 20) < 30).map(p => p.render(ctx, safeWidth));
-  const midPanels = dynamicPanels.filter(p => (p.order ?? 20) >= 30 && (p.order ?? 20) < 40).map(p => p.render(ctx, safeWidth));
-  const postTodoPanels = dynamicPanels.filter(p => (p.order ?? 20) >= 40 && (p.order ?? 20) < 50).map(p => p.render(ctx, safeWidth));
-  const latePanels = dynamicPanels.filter(p => (p.order ?? 20) >= 50).map(p => p.render(ctx, safeWidth));
 
-  const allPanels = [
-    renderSessionPanel(ctx, safeWidth),
+  const renderDyn = (p: import("./panels/registry.ts").DynamicSidebarPanel) => ({
+    lines: p.render(ctx, safeWidth),
+    panel: p,
+  });
+
+  const earlyPanels = dynamicPanels.filter(p => (p.order ?? 20) < 30).map(renderDyn);
+  const midPanels = dynamicPanels.filter(p => (p.order ?? 20) >= 30 && (p.order ?? 20) < 40).map(renderDyn);
+  const postTodoPanels = dynamicPanels.filter(p => (p.order ?? 20) >= 40 && (p.order ?? 20) < 50).map(renderDyn);
+  const latePanels = dynamicPanels.filter(p => (p.order ?? 20) >= 50).map(renderDyn);
+
+  const allSections: Array<{ lines: string[]; panel?: import("./panels/registry.ts").DynamicSidebarPanel }> = [
+    { lines: renderSessionPanel(ctx, safeWidth) },
     ...earlyPanels,
-    renderMcpPanel(ctx, safeWidth),
+    { lines: renderMcpPanel(ctx, safeWidth) },
     ...midPanels,
-    renderTodosPanel(ctx, safeWidth),
+    { lines: renderTodosPanel(ctx, safeWidth) },
     ...postTodoPanels,
-    renderWorkspacePanel(ctx, safeWidth),
+    { lines: renderWorkspacePanel(ctx, safeWidth) },
     ...latePanels,
   ];
   // Skip empty panels (MCP panel returns [] when no servers)
-  const panels = allPanels.filter(p => p.length > 0);
+  const sections = allSections.filter(s => s.lines.length > 0);
 
-  const result: string[] = [];
-  for (let i = 0; i < panels.length; i++) {
-    if (i > 0) result.push("");
-    for (const line of panels[i]) {
-      result.push(truncateToWidth(line, safeWidth, "", true));
+  const lines: string[] = [];
+  const meta: RenderedPanelLineMeta[] = [];
+
+  for (let i = 0; i < sections.length; i++) {
+    if (i > 0) {
+      lines.push("");
+      meta.push({});
+    }
+    const sec = sections[i];
+    for (let l = 0; l < sec.lines.length; l++) {
+      lines.push(truncateToWidth(sec.lines[l], safeWidth, "", true));
+      meta.push({ panel: sec.panel, lineIndex: l });
     }
   }
 
-  return result;
+  return { lines, meta };
+}
+
+export function renderSidebar(ctx: SidebarContext, width: number): string[] {
+  return renderSidebarWithMeta(ctx, width).lines;
 }
