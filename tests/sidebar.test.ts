@@ -324,3 +324,72 @@ test("SidebarCompositor dispatches mouse click to panel onClick handler", () => 
   comp.dispose();
   clearRegisteredSidebarPanels();
 });
+
+test("SidebarCompositor safely handles narrow terminal resize without negative coordinates", () => {
+  const writes: string[] = [];
+  const term = {
+    columns: 45, // Narrow: 45 < 40 + 10 (MIN_USABLE_MAIN_WIDTH)
+    rows: 24,
+    write(d: string) { writes.push(d); },
+  };
+  const mockTui = {
+    terminal: term,
+    mode: "fullscreen",
+    doRender() {
+      term.write("\x1b[1;1H\x1b[2KContent");
+    },
+  };
+
+  const comp = new SidebarCompositor(mockTui, () => makeCtx({}), 40);
+  comp.install();
+
+  // Terminal columns should not be shrunk down to 1 or negative
+  assert.equal(term.columns, 45, "narrow terminal should retain its full width");
+
+  mockTui.doRender();
+
+  // Compositor must not write negative or zero column cursor sequences
+  for (const w of writes) {
+    assert.ok(!w.includes(";-"), `found negative coordinate in write: ${w}`);
+    assert.ok(!w.includes(";0H"), `found zero column coordinate in write: ${w}`);
+  }
+
+  comp.dispose();
+});
+
+test("SidebarCompositor intercepts mouse-down inside sidebar to protect main transcript selection", () => {
+  let mainMouseCalls = 0;
+  const mockTui: any = {
+    mode: "fullscreen",
+    terminal: { rows: 20, columns: 80, write: () => {} },
+    handleMouseEvent: () => {
+      mainMouseCalls++;
+    },
+  };
+
+  const comp = new SidebarCompositor(mockTui, () => makeCtx({ cwd: "" }), 30);
+  comp.install();
+
+  // Press down inside sidebar area (x = 60 >= 80 - 30 - 1 = 49)
+  mockTui.handleMouseEvent({
+    x: 60,
+    y: 5,
+    button: 0,
+    release: false,
+  });
+
+  // Must be intercepted: main area handler never called for sidebar mouse-down
+  assert.equal(mainMouseCalls, 0, "mouse down in sidebar should not reach main TUI handler");
+
+  // Press down in main area (x = 10)
+  mockTui.handleMouseEvent({
+    x: 10,
+    y: 5,
+    button: 0,
+    release: false,
+  });
+
+  assert.equal(mainMouseCalls, 1, "mouse down in main area should reach main TUI handler");
+
+  comp.dispose();
+});

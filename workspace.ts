@@ -9,7 +9,7 @@ export interface WorkspaceData {
 }
 
 const CACHE_TTL_MS = 2000;
-let cache: { data: WorkspaceData; timestamp: number } | null = null;
+let cache: { cwd: string; data: WorkspaceData; timestamp: number } | null = null;
 
 function run(cmd: string, cwd: string): string {
   try {
@@ -61,11 +61,11 @@ export function getWorkspaceData(cwd: string | undefined): WorkspaceData {
   if (!cwd) return empty;
 
   const now = Date.now();
-  if (cache && now - cache.timestamp < CACHE_TTL_MS) return cache.data;
+  if (cache && cache.cwd === cwd && now - cache.timestamp < CACHE_TTL_MS) return cache.data;
 
   const branch = parseBranch(cwd);
   if (!branch) {
-    cache = { data: empty, timestamp: now };
+    cache = { cwd, data: empty, timestamp: now };
     return empty;
   }
 
@@ -75,7 +75,7 @@ export function getWorkspaceData(cwd: string | undefined): WorkspaceData {
     untrackedCount: parseUntracked(cwd),
     files: parseNumstat(cwd),
   };
-  cache = { data, timestamp: now };
+  cache = { cwd, data, timestamp: now };
   return data;
 }
 

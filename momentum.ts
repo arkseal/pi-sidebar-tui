@@ -280,6 +280,7 @@ export class ScrollMomentum {
   }
 
   private startCoasting(tuiInstance: any, dir: number, velocity: number, swipeCount = 1): void {
+    this.stopCoasting();
     this.isCoasting = true;
     this.coastStartTime = Date.now();
     // Friction curve based on Chromium/Firefox FlingBooster level:
@@ -337,6 +338,7 @@ export class ScrollMomentum {
 
   private startCoastingSidebar(compositor: any, dir: number, velocity: number, swipeCount = 1): void {
     if (!compositor) return;
+    this.stopCoasting();
     this.isCoasting = true;
     this.coastStartTime = Date.now();
     let friction = 0.88;

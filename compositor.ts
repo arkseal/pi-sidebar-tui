@@ -15,6 +15,8 @@ const SIDEBAR_BG = (() => {
 })();
 const BG_RESET = "\x1b[49m";
 
+export const MIN_USABLE_MAIN_WIDTH = 10;
+
 function moveCursor(row: number, col: number): string {
   return `\x1b[${row};${col}H`;
 }
@@ -41,6 +43,10 @@ export class SidebarCompositor {
   private originalColumnsOwnDesc: PropertyDescriptor | undefined;
   private originalDoRender: ((...args: any[]) => any) | null = null;
   private originalWrite: (data: string) => void;
+  private originalTerminalWrite: ((data: string) => any) | null = null;
+  private inDoRender = false;
+  private currentRenderMainWidth = 0;
+  private forceFullPaintDuringRender = false;
   private disposed = false;
   private onScreenLines: string[] = [];
   private onScreenPanels: Array<import("./panels/registry.ts").DynamicSidebarPanel | undefined> = [];
@@ -97,9 +103,29 @@ export class SidebarCompositor {
       get() {
         const d = origDesc;
         const raw = d?.get ? (d.get.call(terminal) ?? 80) : (typeof d?.value === "number" ? d.value : 80);
-        return Math.max(1, raw - self.sidebarWidth - 1);
+        if (typeof raw !== "number" || !Number.isFinite(raw) || raw < self.sidebarWidth + MIN_USABLE_MAIN_WIDTH) {
+          return typeof raw === "number" && Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : 80;
+        }
+        return Math.max(1, Math.floor(raw - self.sidebarWidth - 1));
       },
     });
+
+    // Wrap terminal.write once for the compositor lifetime rather than redefining on every render frame
+    const origTerminalWrite = this.terminal.write;
+    this.originalTerminalWrite = origTerminalWrite;
+    this.terminal.write = function (data: any) {
+      if (self.inDoRender && typeof data === "string") {
+        if (/\x1b\[(?:2J|3J)|\n|\r\n|\x1b\[\d*[ST]|\x1bM/.test(data)) {
+          self.forceFullPaintDuringRender = true;
+          self.cacheValid = false;
+        }
+        const sanitized = data
+          .replace(/\x1b\[\?2026[hl]/g, "")
+          .replace(/\x1b\[2K/g, `\x1b[${self.currentRenderMainWidth}X`);
+        return origTerminalWrite.call(this, sanitized);
+      }
+      return origTerminalWrite.call(this, data);
+    };
 
     // Paint sidebar after every pi render cycle.
     //
@@ -117,34 +143,16 @@ export class SidebarCompositor {
       this.tui.doRender = function (...args: any[]) {
         if (self.disposed) return originalDoRender.apply(this, args);
 
-        const writeOwnDesc = Object.getOwnPropertyDescriptor(terminal, "write");
-        const originalWrite = terminal.write;
         const mainWidth = self.mainWidth();
-        let forceFullPaint = false;
+        self.currentRenderMainWidth = mainWidth;
+        self.forceFullPaintDuringRender = false;
+        self.inDoRender = true;
         let result: any;
         let didThrow = false;
         let thrown: unknown;
 
         self.originalWrite("\x1b[?2026h"); // begin synchronized output (single frame)
         try {
-          Object.defineProperty(terminal, "write", {
-            configurable: true,
-            enumerable: true,
-            writable: true,
-            value(this: any, data: string) {
-              if (typeof data !== "string") return originalWrite.call(this, data);
-              // Any screen clear or scroll/newline shifts terminal rows; must force full repaint
-              if (/\x1b\[(?:2J|3J)|\n|\r\n|\x1b\[\d*[ST]|\x1bM/.test(data)) {
-                forceFullPaint = true;
-                self.cacheValid = false;
-              }
-              const sanitized = data
-                .replace(/\x1b\[\?2026[hl]/g, "")
-                .replace(/\x1b\[2K/g, `\x1b[${mainWidth}X`);
-              return originalWrite.call(this, sanitized);
-            },
-          });
-
           try {
             result = originalDoRender.apply(this, args);
           } catch (error) {
@@ -154,17 +162,13 @@ export class SidebarCompositor {
 
           if (!didThrow) {
             try {
-              self.paintInternal(forceFullPaint, false);
+              self.paintInternal(self.forceFullPaintDuringRender, false);
             } catch {
               // Sidebar painting must never break pi's render cycle.
             }
           }
         } finally {
-          if (writeOwnDesc) {
-            Object.defineProperty(terminal, "write", writeOwnDesc);
-          } else {
-            Reflect.deleteProperty(terminal, "write");
-          }
+          self.inDoRender = false;
           self.originalWrite("\x1b[?2026l"); // end synchronized output
         }
 
@@ -179,6 +183,9 @@ export class SidebarCompositor {
       this.tui.handleMouseEvent = function (raw: any) {
         if (self.disposed) return origHandleMouseEvent.call(this, raw);
         const rawCols = self.rawColumns();
+        if (rawCols < self.sidebarWidth + MIN_USABLE_MAIN_WIDTH) {
+          return origHandleMouseEvent.call(this, raw);
+        }
         const sidebarStartCol = Math.max(0, rawCols - self.sidebarWidth - 1);
         const isRelease = Boolean(raw.release);
         const button = raw.button & 3; // 0 = left button
@@ -187,6 +194,7 @@ export class SidebarCompositor {
           const row = raw.y; // raw.y is 0-based screen row
           if (!isRelease) {
             self.pressInSidebarRow = row;
+            return;
           } else {
             const pressRow = self.pressInSidebarRow;
             self.pressInSidebarRow = null;
@@ -195,7 +203,10 @@ export class SidebarCompositor {
                 return;
               }
             }
+            return;
           }
+        } else {
+          self.pressInSidebarRow = null;
         }
         return origHandleMouseEvent.call(this, raw);
       };
@@ -277,13 +288,16 @@ export class SidebarCompositor {
   // erase so the sidebar columns are never cleared.
   private mainWidth(): number {
     const rawCols = this.rawColumns();
+    if (rawCols < this.sidebarWidth + MIN_USABLE_MAIN_WIDTH) {
+      return rawCols;
+    }
     return Math.max(1, rawCols - this.sidebarWidth - 1);
   }
 
   private formatLine(line: string | undefined, width: number): string {
     const content = line === undefined ? "" : truncateToWidth(line, width, "", true);
-    const padding = Math.max(0, width - visibleWidth(content));
-    return `${SIDEBAR_BG}${content}${" ".repeat(padding)}${BG_RESET}`;
+    if (!SIDEBAR_BG) return content;
+    return `${SIDEBAR_BG}${content}${BG_RESET}`;
   }
   handleClickAt(screenRow: number): boolean {
     if (!this.onScreenLines || screenRow < 0 || screenRow >= this.onScreenLines.length) {
@@ -343,6 +357,14 @@ export class SidebarCompositor {
     const rawRows = this.terminal.rows;
     const rawCols = this.rawColumns();
     const sw = this.sidebarWidth;
+
+    // Safety check for terminal resize / narrow screens:
+    // If terminal width cannot fit both main area and sidebar, or height is too small,
+    // skip painting sidebar to prevent emitting invalid negative cursor coordinates.
+    if (rawCols < sw + MIN_USABLE_MAIN_WIDTH || rawRows < 2) {
+      return;
+    }
+
     const sepCol = rawCols - sw;
     const sidebarCol = sepCol + 1;
     const ctx = this.getCtx();
@@ -506,6 +528,11 @@ export class SidebarCompositor {
     }
     delete term[SYM_ORIG_DESC];
     delete term[SYM_ORIG_OWN_DESC];
+
+    if (this.originalTerminalWrite !== null) {
+      this.terminal.write = this.originalTerminalWrite;
+      this.originalTerminalWrite = null;
+    }
 
     if (this.originalDoRender !== null) {
       this.tui.doRender = this.originalDoRender;

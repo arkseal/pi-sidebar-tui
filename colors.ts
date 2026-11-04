@@ -46,6 +46,10 @@ export function setPiTheme(t: any): void {
   _piTheme = t;
 }
 
+export function resetPiTheme(): void {
+  _piTheme = null;
+}
+
 export function bold(text: string): string {
   if (_piTheme) return _piTheme.bold(text);
   return `${BOLD}${text}${RESET}`;

@@ -7,7 +7,7 @@ import { getWorkspaceData, invalidateWorkspaceCache } from "./workspace.ts";
 import { SidebarCompositor } from "./compositor.ts";
 import { getMcpServers, invalidateMcpCache } from "./mcp.ts";
 import { loadCavemanConfig, resolveCavemanLevel, cavemanInterval, type CavemanConfig } from "./caveman.ts";
-import { setPiTheme } from "./colors.ts";
+import { setPiTheme, resetPiTheme } from "./colors.ts";
 import { setSidebarRenderCallback } from "./panels/registry.ts";
 import { ScrollMomentum } from "./momentum.ts";
 import { SidebarStatsTracker, emptySidebarStats } from "./stats.ts";
@@ -450,6 +450,7 @@ export default function piSidebar(pi: ExtensionAPI) {
           momentumRef?.dispose();
           momentumRef = null;
           tuiRef = null;
+          resetPiTheme();
         },
         invalidate() {},
         render(_width: number): string[] { return []; },
@@ -490,6 +491,14 @@ export default function piSidebar(pi: ExtensionAPI) {
     tpsSamples = [];
     sessionTitle = null;
     todos = [];
+    contextTokens = null;
+    contextPercent = null;
+    contextWindow = null;
+    currentModel = null;
+    thinkingLevel = null;
+    modelProvider = null;
+    currentCwd = undefined;
+    resetPiTheme();
   });
 
   pi.on("before_agent_start", async (event, ctx) => {

@@ -3,13 +3,17 @@ import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { SidebarContext, TodoItem, WorkspaceFile } from "../types.ts";
 import { renderSessionPanel, estimateCtxLeft } from "../panels/session.ts";
-import { thinkingColorName, spinnerFrameAt, SPINNER_FRAMES } from "../colors.ts";
+import { thinkingColorName, spinnerFrameAt, SPINNER_FRAMES, setPiTheme } from "../colors.ts";
 import { renderTodosPanel, selectTodosToShow } from "../panels/todos.ts";
 import { renderWorkspacePanel } from "../panels/workspace.ts";
 
 function strip(s: string): string {
   return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
+
+test.beforeEach(() => {
+  setPiTheme(null);
+});
 
 function makeCtx(overrides: Partial<SidebarContext> = {}): SidebarContext {
   return {
