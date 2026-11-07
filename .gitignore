@@ -1,8 +1,9 @@
 # Dependencies
 node_modules/
 
-# Generated/lock files
+# Bun is the canonical development lock.
 package-lock.json
+!bun.lock
 
 # Superpowers AI agent scratch space
 docs/superpowers/
