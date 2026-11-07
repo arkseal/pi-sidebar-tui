@@ -16,6 +16,7 @@ function makeCtx(overrides: Partial<SidebarContext> = {}): SidebarContext {
     sessionTitle: null,
     sessionId: null,
     todos: [],
+    todosMax: 5,
     branch: "main",
     aheadCount: 0,
     untrackedCount: 0,
@@ -37,6 +38,10 @@ function makeCtx(overrides: Partial<SidebarContext> = {}): SidebarContext {
     sessionStartMs: Date.now(),
     mcpServers: [],
     modelProvider: null,
+    cavemanLevel: null,
+    cavemanFrame: 0,
+    agentActive: false,
+    spinnerFrame: 0,
     liveTps: null,
     lastTps: null,
     lastTurnMs: null,
@@ -354,7 +359,37 @@ test("SidebarCompositor safely handles narrow terminal resize without negative c
     assert.ok(!w.includes(";0H"), `found zero column coordinate in write: ${w}`);
   }
 
+  // Expanding back to the old dimensions must repaint after a narrow frame.
+  const narrowWrites = writes.length;
+  term.columns = 80;
+  mockTui.doRender();
+  assert.ok(writes.length > narrowWrites, "sidebar should repaint after expanding from a too-narrow terminal");
+  assert.ok(writes.slice(narrowWrites).some(w => w.includes("│")), "expanded frame should paint separator again");
+
   comp.dispose();
+});
+
+test("SidebarCompositor restores exact terminal.write descriptor and does not clobber later wrappers", () => {
+  const term: any = {
+    columns: 80,
+    rows: 24,
+    write(d: string) { return d.length; },
+  };
+  const original = Object.getOwnPropertyDescriptor(term, "write")!;
+  const tui: any = { terminal: term, mode: "fullscreen", doRender() {} };
+  const comp = new SidebarCompositor(tui, () => makeCtx({}), 20);
+  comp.install();
+  assert.notEqual(term.write, original.value);
+  comp.dispose();
+  assert.deepEqual(Object.getOwnPropertyDescriptor(term, "write"), original);
+
+  const comp2 = new SidebarCompositor(tui, () => makeCtx({}), 20);
+  comp2.install();
+  const compositorWrapper = term.write;
+  const laterWrapper = function (this: any, data: string) { return compositorWrapper.call(this, data); };
+  term.write = laterWrapper;
+  comp2.dispose();
+  assert.equal(term.write, laterWrapper, "dispose must not overwrite a wrapper installed later");
 });
 
 test("SidebarCompositor intercepts mouse-down inside sidebar to protect main transcript selection", () => {

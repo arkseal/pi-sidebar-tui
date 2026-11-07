@@ -44,6 +44,8 @@ export class SidebarCompositor {
   private originalDoRender: ((...args: any[]) => any) | null = null;
   private originalWrite: (data: string) => void;
   private originalTerminalWrite: ((data: string) => any) | null = null;
+  private originalTerminalWriteOwnDesc: PropertyDescriptor | undefined;
+  private terminalWriteWrapper: ((data: any) => any) | null = null;
   private inDoRender = false;
   private currentRenderMainWidth = 0;
   private forceFullPaintDuringRender = false;
@@ -108,12 +110,24 @@ export class SidebarCompositor {
         }
         return Math.max(1, Math.floor(raw - self.sidebarWidth - 1));
       },
+      set(val: any) {
+        if (origDesc?.set) {
+          origDesc.set.call(terminal, val);
+        } else if (origDesc) {
+          origDesc.value = val;
+          if (self.originalColumnsOwnDesc) {
+            self.originalColumnsOwnDesc.value = val;
+          }
+        }
+      },
     });
 
-    // Wrap terminal.write once for the compositor lifetime rather than redefining on every render frame
-    const origTerminalWrite = this.terminal.write;
+    // Wrap terminal.write once for the compositor lifetime rather than redefining on every render frame.
+    // Preserve the original own-property descriptor so cleanup restores exact host state.
+    this.originalTerminalWriteOwnDesc = Object.getOwnPropertyDescriptor(terminal, "write");
+    const origTerminalWrite = terminal.write;
     this.originalTerminalWrite = origTerminalWrite;
-    this.terminal.write = function (data: any) {
+    this.terminalWriteWrapper = function (this: any, data: any) {
       if (self.inDoRender && typeof data === "string") {
         if (/\x1b\[(?:2J|3J)|\n|\r\n|\x1b\[\d*[ST]|\x1bM/.test(data)) {
           self.forceFullPaintDuringRender = true;
@@ -126,6 +140,7 @@ export class SidebarCompositor {
       }
       return origTerminalWrite.call(this, data);
     };
+    this.terminal.write = this.terminalWriteWrapper;
 
     // Paint sidebar after every pi render cycle.
     //
@@ -362,6 +377,7 @@ export class SidebarCompositor {
     // If terminal width cannot fit both main area and sidebar, or height is too small,
     // skip painting sidebar to prevent emitting invalid negative cursor coordinates.
     if (rawCols < sw + MIN_USABLE_MAIN_WIDTH || rawRows < 2) {
+      this.cacheValid = false;
       return;
     }
 
@@ -529,10 +545,16 @@ export class SidebarCompositor {
     delete term[SYM_ORIG_DESC];
     delete term[SYM_ORIG_OWN_DESC];
 
-    if (this.originalTerminalWrite !== null) {
-      this.terminal.write = this.originalTerminalWrite;
-      this.originalTerminalWrite = null;
+    if (this.terminalWriteWrapper && this.terminal.write === this.terminalWriteWrapper) {
+      if (this.originalTerminalWriteOwnDesc) {
+        Object.defineProperty(this.terminal, "write", this.originalTerminalWriteOwnDesc);
+      } else {
+        Reflect.deleteProperty(this.terminal, "write");
+      }
     }
+    this.originalTerminalWrite = null;
+    this.originalTerminalWriteOwnDesc = undefined;
+    this.terminalWriteWrapper = null;
 
     if (this.originalDoRender !== null) {
       this.tui.doRender = this.originalDoRender;

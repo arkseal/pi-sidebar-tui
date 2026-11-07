@@ -93,7 +93,7 @@ export function loadSidebarSettings(path: string = sidebarConfigPath()): Sidebar
   return settings;
 }
 
-export function saveSidebarSettings(settings: SidebarSettings, path: string = sidebarConfigPath()): void {
+export function saveSidebarSettings(settings: Partial<SidebarSettings> & Pick<SidebarSettings, "enabled" | "width">, path: string = sidebarConfigPath()): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(settings, null, 2) + "\n", "utf8");
 }

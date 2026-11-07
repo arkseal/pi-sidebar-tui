@@ -47,6 +47,8 @@ function makeCtx(overrides: Partial<SidebarContext> = {}): SidebarContext {
     lastTurnMs: null,
     agentActive: false,
     spinnerFrame: 0,
+    cavemanLevel: null,
+    cavemanFrame: 0,
     ctxSamples: [],
     ...overrides,
   };
